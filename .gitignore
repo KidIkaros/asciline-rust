@@ -1,0 +1,6 @@
+/target
+Cargo.lock.orig
+experiments/vectors_*.bin
+experiments/gen_python.log
+*.ascf
+*.mp3

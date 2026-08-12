@@ -1,0 +1,59 @@
+[package]
+name = "asciline"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of ASCILINE: real-time ASCII video rendering engine (decode -> ASCII map -> adaptive codec -> stream)"
+license = "MIT"
+readme = "README.md"
+keywords = ["ascii", "video", "websocket", "terminal", "codec"]
+categories = ["multimedia", "command-line-utilities"]
+
+[lib]
+name = "asciline"
+path = "src/lib.rs"
+
+[[bin]]
+name = "asciline-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "asciline-player"
+path = "src/bin/player.rs"
+
+[[bin]]
+name = "asciline-compile"
+path = "src/bin/compile.rs"
+
+[dependencies]
+# Async runtime + web server
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws", "tokio"] }
+futures-util = "0.3"
+
+# Compression (zlib) - pure Rust backend, no C deps
+flate2 = "1"
+
+# Parallelism for the frame mapper
+rayon = "1"
+
+# CLI + serialization
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors
+anyhow = "1"
+
+# Terminal size probing
+crossterm = "0.28"
+
+# Graceful Ctrl+C for the terminal player
+ctrlc = "3"
+
+[dev-dependencies]
+tokio-tungstenite = "0.26"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4

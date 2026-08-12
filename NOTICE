@@ -1,0 +1,24 @@
+ASCILINE·Rust — NOTICE
+======================
+
+This project is a from-scratch Rust re-implementation of the backend engine of
+ASCILINE (https://github.com/YusufB5/ASCILINE), Copyright (c) 2026 YusufB5,
+released under the MIT License (with Anti-Advertisement Restriction), a copy of
+which is in LICENSE.
+
+The following files in web/ are copied unmodified from the original project and
+remain under its license:
+
+  web/index.html   — web player UI
+  web/app.js       — frontend WebSocket client + canvas render loop
+  web/style.css    — player styling
+  web/codec.js     — shared adaptive-codec decoder (browser/Node)
+
+They are served by the Rust server (asciline-server) so that the original
+browser client works against the Rust backend unchanged.
+
+The wire protocol (INIT text handshake, binary frame format
+[4-byte frame index BE][1-byte codec tag][payload], codec tags 0-3, and the .ascf
+v2 "ASC2" container) is re-implemented from the original project's public
+protocol, with the codec verified bit-exact against the original encoder and
+decoder by the differential tests in experiments/ and tests/.

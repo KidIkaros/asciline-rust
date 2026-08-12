@@ -154,14 +154,12 @@ struct AudioQuery {
     token: Option<String>,
 }
 
-async fn audio_stream(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<AudioQuery>,
-) -> Response {
+async fn audio_stream(State(state): State<Arc<AppState>>, Query(q): Query<AudioQuery>) -> Response {
     if !token_ok(&state, q.token.as_deref()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let idx = q.v.unwrap_or_else(|| state.current_index.load(Ordering::SeqCst) as u32) as usize;
+    let idx =
+        q.v.unwrap_or_else(|| state.current_index.load(Ordering::SeqCst) as u32) as usize;
     let Some(entry) = state.queue.get(idx) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -222,23 +220,23 @@ async fn audio_stream(
     };
 
     let stdout = child.stdout.take().expect("piped stdout");
-    let stream = futures_util::stream::unfold((stdout, Some(child), Some(permit)), |(mut s, mut c, permit)| async move {
-        let mut buf = vec![0u8; 8192];
-        match s.read(&mut buf).await {
-            Ok(0) | Err(_) => {
-                if let Some(mut c) = c.take() {
-                    let _ = c.kill().await;
-                    let _ = c.wait().await;
+    let stream = futures_util::stream::unfold(
+        (stdout, KillOnDrop::new(child), Some(permit)),
+        |(mut s, mut c, permit)| async move {
+            let mut buf = vec![0u8; 8192];
+            match s.read(&mut buf).await {
+                Ok(0) | Err(_) => {
+                    c.stop().await; // kill + reap at natural stream end
+                    drop(permit); // release the ffmpeg slot
+                    None
                 }
-                drop(permit); // release the ffmpeg slot
-                None
+                Ok(n) => {
+                    buf.truncate(n);
+                    Some((Ok::<_, std::io::Error>(buf), (s, c, permit)))
+                }
             }
-            Ok(n) => {
-                buf.truncate(n);
-                Some((Ok::<_, std::io::Error>(buf), (s, c, permit)))
-            }
-        }
-    });
+        },
+    );
 
     Response::builder()
         .header(header::CONTENT_TYPE, "audio/mpeg")
@@ -247,17 +245,15 @@ async fn audio_stream(
         .unwrap()
 }
 
-async fn scrub_meta(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<ScrubQuery>,
-) -> Response {
+async fn scrub_meta(State(state): State<Arc<AppState>>, Query(q): Query<ScrubQuery>) -> Response {
     if !token_ok(&state, q.token.as_deref()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if !state.thumbnails {
         return json_response(&serde_json::json!({"available": false}));
     }
-    let idx = q.v.unwrap_or_else(|| state.current_index.load(Ordering::SeqCst) as u32) as usize;
+    let idx =
+        q.v.unwrap_or_else(|| state.current_index.load(Ordering::SeqCst) as u32) as usize;
     let Some(entry) = state.queue.get(idx) else {
         return json_response(&serde_json::json!({"available": false}));
     };
@@ -310,14 +306,12 @@ async fn scrub_meta(
     json_response(&serde_json::Value::Object(meta))
 }
 
-async fn scrub_sprite(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<ScrubQuery>,
-) -> Response {
+async fn scrub_sprite(State(state): State<Arc<AppState>>, Query(q): Query<ScrubQuery>) -> Response {
     if !token_ok(&state, q.token.as_deref()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let idx = q.v.unwrap_or_else(|| state.current_index.load(Ordering::SeqCst) as u32) as usize;
+    let idx =
+        q.v.unwrap_or_else(|| state.current_index.load(Ordering::SeqCst) as u32) as usize;
     let Some(entry) = state.queue.get(idx) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -344,6 +338,36 @@ fn json_response(v: &serde_json::Value) -> Response {
         .unwrap()
 }
 
+/// Owns a spawned child and guarantees it is killed even when the response
+/// stream is dropped early (client disconnect): `stop()` reaps it cleanly at
+/// natural end-of-stream, `Drop` fires `start_kill` on any other exit path so
+/// no ffmpeg orphan outlives the request (the pipe-EPIPE exit is then merely
+/// a backstop).
+struct KillOnDrop {
+    child: Option<tokio::process::Child>,
+}
+
+impl KillOnDrop {
+    fn new(child: tokio::process::Child) -> KillOnDrop {
+        KillOnDrop { child: Some(child) }
+    }
+
+    async fn stop(&mut self) {
+        if let Some(mut c) = self.child.take() {
+            let _ = c.kill().await;
+            let _ = c.wait().await;
+        }
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.child.take() {
+            let _ = c.start_kill();
+        }
+    }
+}
+
 /// Build a tiled JPEG hover-preview sprite with a single ffmpeg pass.
 fn build_scrub_sprite(video_path: &str, max_count: usize, cell_w: u32) -> Option<ScrubSprite> {
     let info = probe_video(video_path, false).ok()?;
@@ -354,7 +378,11 @@ fn build_scrub_sprite(video_path: &str, max_count: usize, cell_w: u32) -> Option
     } else {
         (info.duration * fps).round() as u64
     };
-    let duration = if total > 0 { total as f64 / fps } else { info.duration };
+    let duration = if total > 0 {
+        total as f64 / fps
+    } else {
+        info.duration
+    };
     if duration <= 0.0 || w0 == 0 || h0 == 0 {
         return None;
     }
@@ -372,7 +400,18 @@ fn build_scrub_sprite(video_path: &str, max_count: usize, cell_w: u32) -> Option
         .arg("-nostdin")
         .arg("-i")
         .arg(video_path)
-        .args(["-vf", &vf, "-frames:v", "1", "-q:v", "4", "-f", "image2", "-c:v", "mjpeg"])
+        .args([
+            "-vf",
+            &vf,
+            "-frames:v",
+            "1",
+            "-q:v",
+            "4",
+            "-f",
+            "image2",
+            "-c:v",
+            "mjpeg",
+        ])
         .arg("-loglevel")
         .arg("error")
         .arg("pipe:1")
@@ -401,7 +440,10 @@ fn build_scrub_sprite(video_path: &str, max_count: usize, cell_w: u32) -> Option
 fn origin_hostname(origin: &str) -> Option<&str> {
     let after = origin.split_once("//").map(|(_, h)| h).unwrap_or(origin);
     let host = after.split(['/', '?']).next()?;
-    let host = host.strip_prefix('[').and_then(|h| h.split(']').next()).unwrap_or(host);
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.split(']').next())
+        .unwrap_or(host);
     Some(host.split(':').next().unwrap_or(host).trim())
 }
 
@@ -528,7 +570,8 @@ impl EncoderState {
         }
 
         let mut fb = vec![0u8; cols * rows * 4];
-        self.mapper.map_ascii_with_gray(&rgb, &gray, cols, rows, &mut fb);
+        self.mapper
+            .map_ascii_with_gray(&rgb, &gray, cols, rows, &mut fb);
         let raw_size = 4 + fb.len();
         if self.adaptive {
             let msg = self.enc.encode(&fb, index);
@@ -721,7 +764,10 @@ async fn ws_handler(
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
     };
-    let adaptive = params.get("codec").map(|s| s == "adaptive").unwrap_or(false);
+    let adaptive = params
+        .get("codec")
+        .map(|s| s == "adaptive")
+        .unwrap_or(false);
     ws.on_upgrade(move |socket| run_stream(socket, state, adaptive, permit))
 }
 
@@ -756,7 +802,9 @@ async fn run_stream(
     let mut queue_index = 0usize;
 
     if queue.is_empty() {
-        let _ = sink.send(Message::Text("Error: No video in queue!".into())).await;
+        let _ = sink
+            .send(Message::Text("Error: No video in queue!".into()))
+            .await;
         let _ = sink.close().await;
         recv_task.abort();
         return;
@@ -774,7 +822,9 @@ async fn run_stream(
             Ok(i) => i,
             Err(e) => {
                 let _ = sink
-                    .send(Message::Text(format!("Error: could not open '{}': {}", entry.video, e).into()))
+                    .send(Message::Text(
+                        format!("Error: could not open '{}': {}", entry.video, e).into(),
+                    ))
                     .await;
                 queue_index += 1;
                 if queue_index >= queue.len() {
@@ -801,7 +851,10 @@ async fn run_stream(
         );
 
         let (cols, rows) = entry.resolve_cols_rows(info.width, info.height);
-        println!("[AUTO] {}x{} → grid {}x{}", info.width, info.height, cols, rows);
+        println!(
+            "[AUTO] {}x{} → grid {}x{}",
+            info.width, info.height, cols, rows
+        );
 
         let source_fps = if entry.fallback_fps > 0.0 {
             entry.fallback_fps
@@ -817,7 +870,15 @@ async fn run_stream(
         let duration = info.duration;
 
         let init = init_message(
-            target_fps, mode, cols, rows, pixel, queue_index as u32, duration, 0.0, entry.is_webcam,
+            target_fps,
+            mode,
+            cols,
+            rows,
+            pixel,
+            queue_index as u32,
+            duration,
+            0.0,
+            entry.is_webcam,
         );
         if sink.send(Message::Text(init.into())).await.is_err() {
             break;
@@ -911,8 +972,15 @@ async fn run_stream(
                         let (ncols, nrows) = entry.resolve_cols_rows(info.width, info.height);
                         let target = cmd.get("time").and_then(|t| t.as_f64()).unwrap_or(0.0);
                         let init = init_message(
-                            target_fps, mode, ncols, nrows, pixel, queue_index as u32,
-                            duration, target, is_webcam,
+                            target_fps,
+                            mode,
+                            ncols,
+                            nrows,
+                            pixel,
+                            queue_index as u32,
+                            duration,
+                            target,
+                            is_webcam,
                         );
                         if sink.send(Message::Text(init.into())).await.is_err() {
                             break 'stream;
@@ -938,17 +1006,32 @@ async fn run_stream(
                         client_backlog = 0;
                         consec_high = 0;
                         consec_drops = 0;
-                        println!("[REINIT] {}x{} → grid {}x{}", info.width, info.height, ncols, nrows);
+                        println!(
+                            "[REINIT] {}x{} → grid {}x{}",
+                            info.width, info.height, ncols, nrows
+                        );
                     }
                     "filter" => {
-                        let contrast = cmd.get("contrast").and_then(|v| v.as_f64()).unwrap_or(1.0)
+                        let contrast = cmd
+                            .get("contrast")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(1.0)
                             .clamp(0.1, 3.0);
-                        let gamma = cmd.get("gamma").and_then(|v| v.as_f64()).unwrap_or(1.0)
+                        let gamma = cmd
+                            .get("gamma")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(1.0)
                             .clamp(0.1, 3.0);
-                        let brightness = cmd.get("brightness").and_then(|v| v.as_f64()).unwrap_or(0.0)
+                        let brightness = cmd
+                            .get("brightness")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0)
                             .clamp(-100.0, 100.0);
                         let invert = cmd.get("invert").and_then(|v| v.as_bool()).unwrap_or(false);
-                        let sharpness = cmd.get("sharpness").and_then(|v| v.as_i64()).unwrap_or(0)
+                        let sharpness = cmd
+                            .get("sharpness")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0)
                             .clamp(0, 10);
                         if let Some(p) = cmd.get("palette").and_then(|v| v.as_str()) {
                             filter_palette = match p {
@@ -1013,7 +1096,11 @@ async fn run_stream(
 
             // Skipped frame: don't map/encode/send; prev stays aligned for deltas.
             if pipeline.skip.swap(false, Ordering::SeqCst)
-                && pipeline.state.lock().unwrap_or_else(|e| e.into_inner()).has_prev()
+                && pipeline
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .has_prev()
             {
                 frame_index += 1;
                 let elapsed = start_time.elapsed().as_secs_f64();
@@ -1029,7 +1116,9 @@ async fn run_stream(
             let st = pipeline.state.clone();
             let index = frame_index;
             let out = tokio::task::spawn_blocking(move || {
-                st.lock().unwrap_or_else(|e| e.into_inner()).produce(frame_msg, index)
+                st.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .produce(frame_msg, index)
             })
             .await;
             let out = match out {
@@ -1043,7 +1132,11 @@ async fn run_stream(
             }
 
             match out {
-                EncodedMsg::Frame { index, kind, raw_size } => {
+                EncodedMsg::Frame {
+                    index,
+                    kind,
+                    raw_size,
+                } => {
                     let (sent, wire_size) = match kind {
                         SendKind::Text(t) => {
                             let wire = t.len();
@@ -1062,8 +1155,15 @@ async fn run_stream(
                     if state.debug && bw_start.elapsed().as_secs_f64() >= 1.0 {
                         let raw_kbps = bw_raw as f64 / 1024.0;
                         let wire_kbps = bw_bytes as f64 / 1024.0;
-                        let ratio = if wire_kbps > 0.0 { raw_kbps / wire_kbps } else { 0.0 };
-                        println!("[BW] RAW: {:.1} KB/s | WIRE: {:.1} KB/s | {:.1}x compression", raw_kbps, wire_kbps, ratio);
+                        let ratio = if wire_kbps > 0.0 {
+                            raw_kbps / wire_kbps
+                        } else {
+                            0.0
+                        };
+                        println!(
+                            "[BW] RAW: {:.1} KB/s | WIRE: {:.1} KB/s | {:.1}x compression",
+                            raw_kbps, wire_kbps, ratio
+                        );
                         bw_start = tokio::time::Instant::now();
                         bw_bytes = 0;
                         bw_raw = 0;

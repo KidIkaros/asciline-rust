@@ -79,11 +79,12 @@ proptest! {
         let _ = dec3.decode(&msg);
     }
 
-    /// Valid-zlib payloads with random tags — this is what reaches the RLE /
-    /// DELTA / ZLIB parse paths, including truncated-run bodies.
+    /// Valid-zlib payloads with real codec tags (0..=3: RAW/ZLIB/DELTA/RLE).
+    /// The tag is constrained to the real tag set so the RLE path — which had
+    /// the OOB panic — is hit ~1/4 of cases, not ~1/256 of a uniform u8.
     #[test]
     fn adaptive_decode_compressed_never_panics(
-        idx in any::<[u8; 4]>(), tag in any::<u8>(), payload in zlib_of(512),
+        idx in any::<[u8; 4]>(), tag in 0..4u8, payload in zlib_of(512),
     ) {
         let mut msg = idx.to_vec();
         msg.push(tag);
@@ -106,13 +107,37 @@ proptest! {
         let _ = dec.decode(&dm);
     }
 
-    /// Tag-4 profile messages: random keyframes + inter frames. The chained
-    /// stream harness below also drives deep dec_plane paths across frames.
+    /// Tag-4 profile messages with random payloads: mostly rejected keyframes
+    /// (random u16 grids) + inter frames — exercises the header validation.
     #[test]
     fn profile_decode_never_panics(idx in any::<[u8; 4]>(), payload in zlib_of(1024)) {
         let mut msg = idx.to_vec();
         msg.push(4);
         msg.extend_from_slice(&payload);
+        let mut dec = ProfileDecoder::new();
+        let _ = dec.decode(&msg);
+    }
+
+    /// Keyframes with SMALL grids pass the header validation, so the block
+    /// decoder (`dec_plane`) runs against random skip masks / motion vectors /
+    /// coefficient pairs — the deep parse path a uniform-u16 strategy never
+    /// reaches (those grids are all rejected as oversized first).
+    #[test]
+    fn profile_valid_grid_never_panics(
+        idx in any::<[u8; 4]>(),
+        w in 16usize..=128,
+        h in 16usize..=128,
+        rest in prop::collection::vec(any::<u8>(), 0..512),
+    ) {
+        let (w, h) = (w as u16, h as u16);
+        let mut payload = vec![
+            0u8, 70, // ftype keyframe, qf
+            (w >> 8) as u8, (w & 0xff) as u8, (h >> 8) as u8, (h & 0xff) as u8,
+        ];
+        payload.extend_from_slice(&rest);
+        let mut msg = idx.to_vec();
+        msg.push(4);
+        msg.extend_from_slice(&zlib_compress(&payload, 6));
         let mut dec = ProfileDecoder::new();
         let _ = dec.decode(&msg);
     }

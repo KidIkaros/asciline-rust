@@ -18,6 +18,10 @@ WORKDIR /srv/asciline
 COPY --from=builder /build/target/release/asciline-server /usr/local/bin/asciline-server
 COPY --from=builder /build/web ./web
 
+# Pre-create the media volume owned by the non-root user: a bind mount owned
+# by a host user would otherwise be unreadable by `asciline`.
+RUN mkdir -p /srv/asciline/videos && chown asciline:asciline /srv/asciline/videos
+
 USER asciline
 EXPOSE 8000
 

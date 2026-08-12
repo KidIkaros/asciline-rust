@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use asciline::codec::{CodecDecoder, TAG_PROFILE};
+use asciline::codec::{CodecDecoder, MAX_DECOMPRESSED, TAG_PROFILE};
 use asciline::mapper::Mapper;
 use asciline::profile::ProfileDecoder;
 use asciline::protocol::{parse_ascf_header, ASCF_MAGIC_V2};
@@ -27,10 +27,6 @@ use asciline::video::{probe_video, FrameReader, SourceParams};
 use clap::Parser;
 
 const CHAR_RATIO: f64 = 0.45;
-/// Cap on a single `.ascf` record length (read before allocating the buffer).
-/// Legitimate frames are a few MB at most; a malformed file must not be able
-/// to claim a multi-GB record and OOM the player.
-const MAX_ASCF_RECORD: usize = 64 << 20;
 
 // terminal control sequences (same as the Python original)
 const CURSOR_HOME: &str = "\x1b[H";
@@ -288,7 +284,9 @@ fn play_ascf(path: &str, stop: &Arc<AtomicBool>) -> Result<()> {
             break; // EOF
         }
         let len = u32::from_be_bytes(len_buf) as usize;
-        if len > MAX_ASCF_RECORD {
+        // Cap before allocating: a malformed file must not be able to claim a
+        // multi-GB record. Same cap as a single decompressed frame.
+        if len > MAX_DECOMPRESSED {
             bail!("ascf record too large ({len} bytes)");
         }
         let mut msg = vec![0u8; len];

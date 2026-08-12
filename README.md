@@ -83,6 +83,9 @@ docker build -t asciline-server .
 docker run -p 8000:8000 -v /path/to/videos:/srv/asciline/videos \
   asciline-server --folder videos --cols 240 --loop
 
+# note: with a bind mount, the host directory must be readable by the
+# container's non-root `asciline` user (chmod o+rX /path/to/videos)
+
 # install.sh (cargo build + copy to ~/.local/bin)
 ./install.sh
 ```
@@ -254,7 +257,7 @@ in the bit-exact decode direction, which is what the tests verify.
 ## Validation
 
 ```bash
-cargo test                    # 52 tests: 41 unit + 11 malformed-input fuzz/proptests
+cargo test                    # 53 tests: 41 unit + 12 malformed-input fuzz/proptests
                               # (codec + profile round-trips incl. DELTA wire format,
                               #  tolerance semantics, scene-cut keyframes, thread-count
                               #  determinism, decoder hardening regressions, …)

@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+
+jobs:
+  build:
+    name: Build release binaries + tarball
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      - name: Package release tarball
+        run: |
+          TAG="${{ github.ref_name }}"
+          mkdir -p dist/asciline-${TAG}-linux-x86_64
+          cp target/release/asciline-server  dist/asciline-${TAG}-linux-x86_64/
+          cp target/release/asciline-player  dist/asciline-${TAG}-linux-x86_64/
+          cp target/release/asciline-compile dist/asciline-${TAG}-linux-x86_64/
+          cp README.md                      dist/asciline-${TAG}-linux-x86_64/
+          cp LICENSE                        dist/asciline-${TAG}-linux-x86_64/
+          cp NOTICE                         dist/asciline-${TAG}-linux-x86_64/
+          cp install.sh                     dist/asciline-${TAG}-linux-x86_64/
+          cp -r web                         dist/asciline-${TAG}-linux-x86_64/web
+          cd dist
+          tar czf asciline-${TAG}-linux-x86_64.tar.gz asciline-${TAG}-linux-x86_64/
+          sha256sum asciline-${TAG}-linux-x86_64.tar.gz > checksums.txt
+          sha256sum asciline-${TAG}-linux-x86_64/asciline-server >> checksums.txt
+          sha256sum asciline-${TAG}-linux-x86_64/asciline-player >> checksums.txt
+          sha256sum asciline-${TAG}-linux-x86_64/asciline-compile >> checksums.txt
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          cat > BUILD_INFO.txt << EOF
+          ASCILINE Rust Release ${TAG}
+          Git Commit: ${GIT_COMMIT}
+          Build Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          Requires: ffmpeg + ffprobe on PATH
+          EOF
+          ls -lh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/asciline-*.tar.gz
+            dist/checksums.txt
+            dist/BUILD_INFO.txt
+          body_path: RELEASE-NOTES.md
+          draft: false
+          prerelease: false

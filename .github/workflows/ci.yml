@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+
+jobs:
+  check:
+    name: Check (stable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy (all targets, warnings are errors)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo check
+        run: cargo check --workspace
+
+  test:
+    name: Test + differentials + e2e + quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install ffmpeg (decode, audio, e2e)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo test
+        run: cargo test
+
+      - name: Bit-exact differential harnesses (Python codec.py + shipped codec.js)
+        # The input vectors (vectors_profile_py.bin / vectors_python.bin) are
+        # committed, so this needs no numpy or the original ASCILINE repo.
+        # roundtrip_profile / decode_python_vectors emit the Rust-side bins the
+        # node scripts then verify against the unchanged browser decoder.
+        run: |
+          cargo test --test decode_profile_vectors -- --ignored
+          cargo test --test roundtrip_profile -- --ignored
+          node experiments/check_profile_vectors.js
+          cargo test --test decode_python_vectors -- --ignored
+          node experiments/check_rust_vectors.js
+
+      - name: e2e server test (real binary over WebSocket)
+        run: cargo test --test e2e_server
+
+      - name: Quality gate smoke test (--profile --quality-threshold)
+        run: |
+          ffmpeg -y -v error -f lavfi -i testsrc2=size=640x360:rate=30:duration=2 \
+            -pix_fmt yuv420p /tmp/ci_clip.mp4
+          cargo build
+          # mean PSNR-Y at QF=70 is ~39 dB: the gate must PASS at 30 ...
+          ./target/debug/asciline-compile /tmp/ci_clip.mp4 --cols 240 --profile \
+            --qf 70 --quality-threshold 30 --out /tmp/ci_pass
+          # ... and FAIL at 50 (exit non-zero).
+          if ./target/debug/asciline-compile /tmp/ci_clip.mp4 --cols 240 --profile \
+              --qf 70 --quality-threshold 50 --out /tmp/ci_fail > /dev/null 2>&1; then
+            echo "quality gate should have failed at threshold 50" >&2
+            exit 1
+          fi
+          rm -f /tmp/ci_clip.mp4 /tmp/ci_pass.ascf /tmp/ci_pass.mp3 \
+                /tmp/ci_fail.ascf /tmp/ci_fail.mp3
+
+      - name: Release build
+        run: cargo build --release
+
+  security-audit:
+    name: Security audit (cargo-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit || true
+
+      - name: Run cargo audit
+        run: cargo audit

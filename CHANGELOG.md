@@ -4,7 +4,41 @@ All notable changes to the ASCILINE Rust port are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
 [SemVer](https://semver.org/).
 
-## [0.1.0] — Unreleased
+## [Unreleased]
+
+### Added
+
+- GitHub Actions CI (`fmt`/`clippy -D warnings`/`cargo test`, the committed
+  bit-exact differential harnesses, the e2e server test, the
+  `--quality-threshold` gate smoke test, `cargo-audit`) and a tag-driven
+  release workflow that packages the three binaries + `web/` + checksums into
+  a GitHub release.
+- Dockerfile (multi-stage, non-root runtime user, `/healthz` health check) and
+  `install.sh` (cargo build + install to `~/.local/bin`).
+- `RELEASE-NOTES.md` for the v0.1.0 release.
+
+### Security
+
+- Server hardening: `--max-clients N` bounds concurrent WebSocket streams
+  (each spawns an ffmpeg child + decode thread), a global ffmpeg-process
+  semaphore bounds `/audio` transcodes and scrub-sprite builds, optional
+  `--token` auth guard on `/ws`, `/audio` and `/scrub*`, a `/healthz`
+  endpoint, and graceful shutdown on SIGINT.
+- Decoder hardening: zlib decompression is capped (64 MiB) against
+  decompression bombs; the RLE_FULL path bounds-checks every run (a truncated
+  run used to panic with an out-of-bounds slice); the tag-4 profile decoder
+  rejects keyframes declaring grids over 4 M pixels (a crafted header
+  previously requested a multi-GB allocation); `asciline-player` caps
+  per-record lengths before allocating.
+- Grid clamps: `--cols`/`--rows` are clamped (playlist overrides included) so
+  a malformed entry can't ask ffmpeg for a gigantic grid.
+
+### Fixed
+
+- `TAG_RLE_FULL` decode could panic on a truncated run (`body[off+2..off+2+cell]`
+  without a bounds check).
+
+## [0.1.0] — 2026-08-12
 
 Initial release: a from-scratch Rust re-implementation of the ASCILINE backend
 (<https://github.com/YusufB5/ASCILINE>). The wire protocol is byte-compatible

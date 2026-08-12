@@ -1,0 +1,8 @@
+target
+.git
+.github
+experiments
+tests
+*.ascf
+*.mp3
+Cargo.lock.orig

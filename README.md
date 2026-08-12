@@ -30,7 +30,7 @@ and the map+encode stage alone runs at a **~3,600 fps ceiling** at 240×67
 
 ## Requirements
 
-- Rust 1.75+ (`cargo build --release`)
+- Rust 1.87+ (`cargo build --release`)
 - `ffmpeg` + `ffprobe` on `PATH` (used for decode, audio, and thumbnails — no C
   libraries, no OpenCV)
 

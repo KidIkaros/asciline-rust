@@ -12,6 +12,10 @@ jobs:
   build:
     name: Build release binaries + tarball
     runs-on: ubuntu-latest
+    # The default GITHUB_TOKEN is read-only on this repo; creating a release
+    # needs explicit contents: write.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 

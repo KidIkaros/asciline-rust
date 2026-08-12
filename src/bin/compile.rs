@@ -369,11 +369,11 @@ fn main() -> Result<()> {
             bail!("--quality-threshold needs a lossy compile (--profile, or --pixel with --tolerance/--quantize)");
         };
         // ∞ mean (lossless reconstruction) is strictly better than any finite
-        // floor, so only finite means below the floor fail the gate.
-        if mean.is_finite() && mean < floor {
-            bail!(
-                "quality gate failed: mean PSNR-Y {mean:.2} dB < required {floor:.2} dB"
-            );
+        // floor, so it passes; anything else — a finite mean below the floor,
+        // or NaN (e.g. a zero-frame compile) — fails closed.
+        let ok = mean.is_infinite() || (mean.is_finite() && mean >= floor);
+        if !ok {
+            bail!("quality gate failed: mean PSNR-Y {mean:?} < required {floor:.2} dB");
         }
         println!("[Quality] gate passed: mean PSNR-Y {mean:.2} dB ≥ {floor:.2} dB");
     }

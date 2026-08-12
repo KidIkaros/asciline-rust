@@ -45,6 +45,11 @@ serde_json = "1"
 # Errors
 anyhow = "1"
 
+# Observability: RUST_LOG-controlled server logging
+# (basic console output stays on stdout; tracing carries lifecycle/errors)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 # Terminal size probing
 crossterm = "0.28"
 

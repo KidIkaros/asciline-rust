@@ -88,9 +88,27 @@ struct Args {
     /// Disable seek-bar hover thumbnails.
     #[arg(long)]
     no_thumbnails: bool,
+
+    /// Maximum concurrent WebSocket clients (each runs its own ffmpeg child +
+    /// decode thread + encode work). Extra connections get a 503.
+    #[arg(long, default_value_t = 8)]
+    max_clients: usize,
+
+    /// Concurrent ffmpeg spawns for /audio transcodes and scrub-sprite builds.
+    #[arg(long, default_value_t = 4)]
+    max_ffmpeg: usize,
+
+    /// Optional shared secret: when set, /ws, /audio and /scrub* require
+    /// `?token=<secret>`. Note the original browser client does not send one,
+    /// so the token must be appended to the URL (see README security section).
+    #[arg(long)]
+    token: Option<String>,
 }
 
 fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
     let args = Args::parse();
 
     // Python-compatible guardrails
@@ -211,7 +229,17 @@ fn main() -> Result<()> {
         fps_override: args.fps,
         web_dir,
         scrub_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        client_permits: Arc::new(tokio::sync::Semaphore::new(args.max_clients.max(1))),
+        max_clients: args.max_clients.max(1),
+        ffmpeg_permits: Arc::new(tokio::sync::Semaphore::new(args.max_ffmpeg.max(1))),
+        token: args.token,
     };
+    if state.token.is_some() {
+        println!(" > Auth       : token required (?token=... on /ws, /audio, /scrub*)");
+    } else {
+        println!(" > Auth       : none (bind 127.0.0.1 by default; see README security section)");
+    }
+    println!(" > Max clients: {}", args.max_clients.max(1));
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -220,10 +248,21 @@ fn main() -> Result<()> {
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind((args.host.as_str(), args.port)).await?;
         println!("[+] Listening on {}", listener.local_addr()?);
-        axum::serve(listener, app(state)).await?;
+        tracing::info!(addr = %listener.local_addr()?, "asciline-server listening");
+        axum::serve(listener, app(state))
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
         Ok::<(), anyhow::Error>(())
     })?;
     Ok(())
+}
+
+/// Wait for SIGINT, then let axum drain in-flight connections before exiting.
+async fn shutdown_signal() {
+    if let Err(e) = tokio::signal::ctrl_c().await {
+        tracing::error!(%e, "failed to install SIGINT handler");
+    }
+    tracing::info!("shutdown signal received — draining connections");
 }
 
 fn find_web_dir() -> PathBuf {

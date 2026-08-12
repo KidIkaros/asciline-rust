@@ -65,6 +65,20 @@ pub struct AppState {
     pub fps_override: Option<f64>,
     pub web_dir: PathBuf,
     pub scrub_cache: Arc<tokio::sync::Mutex<std::collections::HashMap<String, ScrubSprite>>>,
+    /// Bounds concurrent WebSocket streams: each one runs an ffmpeg child, a
+    /// decode thread and blocking-pool encode work, so unbounded connections
+    /// are a resource-exhaustion vector (`--max-clients`).
+    pub client_permits: Arc<tokio::sync::Semaphore>,
+    /// The configured connection cap (mirrors `client_permits`' initial value
+    /// so `/healthz` can report capacity without a semaphore introspection API).
+    pub max_clients: usize,
+    /// Bounds concurrent ffmpeg spawns for `/audio` transcodes and scrub-sprite
+    /// builds (a loop hitting `/audio` would otherwise spawn one process each).
+    pub ffmpeg_permits: Arc<tokio::sync::Semaphore>,
+    /// Optional shared secret: when set, `/ws`, `/audio` and `/scrub*` require
+    /// `?token=<secret>`. Opt-in because the original browser client does not
+    /// send one (see README security section).
+    pub token: Option<String>,
 }
 
 /// Build the axum router. Also used by the e2e integration test.
@@ -75,8 +89,28 @@ pub fn app(state: AppState) -> Router {
         .route("/audio", get(audio_stream))
         .route("/scrub", get(scrub_meta))
         .route("/scrub_sprite", get(scrub_sprite))
+        .route("/healthz", get(health))
         .route("/ws", get(ws_handler))
         .with_state(Arc::new(state))
+}
+
+/// `GET /healthz` — liveness probe for orchestrators / the Docker healthcheck.
+async fn health(State(state): State<Arc<AppState>>) -> Response {
+    let free = state.client_permits.available_permits();
+    json_response(&serde_json::json!({
+        "status": "ok",
+        "clients": { "in_use": state.max_clients.saturating_sub(free), "max": state.max_clients },
+    }))
+}
+
+/// Optional-token gate. Returns true when auth is disabled or the supplied
+/// token matches. Deliberately a plain string compare: the token is an
+/// operator-set secret shared over the (documented, LAN/loopback) deployment.
+fn token_ok(state: &AppState, given: Option<&str>) -> bool {
+    match &state.token {
+        None => true,
+        Some(expected) => given.map(|g| g == expected).unwrap_or(false),
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -117,12 +151,16 @@ async fn static_file(
 struct AudioQuery {
     v: Option<u32>,
     start: Option<f64>,
+    token: Option<String>,
 }
 
 async fn audio_stream(
     State(state): State<Arc<AppState>>,
     Query(q): Query<AudioQuery>,
 ) -> Response {
+    if !token_ok(&state, q.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let idx = q.v.unwrap_or_else(|| state.current_index.load(Ordering::SeqCst) as u32) as usize;
     let Some(entry) = state.queue.get(idx) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -172,9 +210,19 @@ async fn audio_stream(
         Ok(c) => c,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
+    // Hold an ffmpeg permit for the whole transcode: a flood of `/audio`
+    // requests spawns one ffmpeg each, so the semaphore bounds them globally.
+    let permit = match state.ffmpeg_permits.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
 
     let stdout = child.stdout.take().expect("piped stdout");
-    let stream = futures_util::stream::unfold((stdout, Some(child)), |(mut s, mut c)| async move {
+    let stream = futures_util::stream::unfold((stdout, Some(child), Some(permit)), |(mut s, mut c, permit)| async move {
         let mut buf = vec![0u8; 8192];
         match s.read(&mut buf).await {
             Ok(0) | Err(_) => {
@@ -182,11 +230,12 @@ async fn audio_stream(
                     let _ = c.kill().await;
                     let _ = c.wait().await;
                 }
+                drop(permit); // release the ffmpeg slot
                 None
             }
             Ok(n) => {
                 buf.truncate(n);
-                Some((Ok::<_, std::io::Error>(buf), (s, c)))
+                Some((Ok::<_, std::io::Error>(buf), (s, c, permit)))
             }
         }
     });
@@ -202,6 +251,9 @@ async fn scrub_meta(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ScrubQuery>,
 ) -> Response {
+    if !token_ok(&state, q.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     if !state.thumbnails {
         return json_response(&serde_json::json!({"available": false}));
     }
@@ -222,11 +274,21 @@ async fn scrub_meta(
         Some(s) => s,
         None => {
             // Build once per video on first request (off the async path).
+            // Hold an ffmpeg permit while the sprite is built so thumbnail
+            // floods can't spawn unbounded ffmpeg processes.
+            let permit = match state.ffmpeg_permits.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => return json_response(&serde_json::json!({"available": false})),
+            };
             let path_for_build = path.clone();
-            let built = tokio::task::spawn_blocking(move || build_scrub_sprite(&path_for_build, 64, 160))
-                .await
-                .ok()
-                .flatten();
+            let built = tokio::task::spawn_blocking(move || {
+                let r = build_scrub_sprite(&path_for_build, 64, 160);
+                drop(permit);
+                r
+            })
+            .await
+            .ok()
+            .flatten();
             if let Some(s) = built {
                 let mut guard = cache.lock().await;
                 guard.insert(path.clone(), s.clone());
@@ -252,6 +314,9 @@ async fn scrub_sprite(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ScrubQuery>,
 ) -> Response {
+    if !token_ok(&state, q.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let idx = q.v.unwrap_or_else(|| state.current_index.load(Ordering::SeqCst) as u32) as usize;
     let Some(entry) = state.queue.get(idx) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -269,6 +334,7 @@ async fn scrub_sprite(
 #[derive(Deserialize, Default)]
 struct ScrubQuery {
     v: Option<u32>,
+    token: Option<String>,
 }
 
 fn json_response(v: &serde_json::Value) -> Response {
@@ -642,11 +708,29 @@ async fn ws_handler(
     if !origin_allowed(origin, host) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    if !token_ok(&state, params.get("token").map(|s| s.as_str())) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    // Connection cap: every stream owns an ffmpeg child + decode thread + encode
+    // work, so unbounded sockets are a resource-exhaustion vector. Try-acquire
+    // (no queueing): overloaded connections get a 503 and can retry.
+    let permit = match state.client_permits.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            tracing::warn!("ws connection limit reached (--max-clients)");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
     let adaptive = params.get("codec").map(|s| s == "adaptive").unwrap_or(false);
-    ws.on_upgrade(move |socket| run_stream(socket, state, adaptive))
+    ws.on_upgrade(move |socket| run_stream(socket, state, adaptive, permit))
 }
 
-async fn run_stream(socket: WebSocket, state: Arc<AppState>, adaptive: bool) {
+async fn run_stream(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    adaptive: bool,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+) {
     let (mut sink, mut stream) = socket.split();
     // Bounded command queue: a chatty client can't grow memory unboundedly.
     // If it overflows we drop the oldest command (stale filter/buffer updates

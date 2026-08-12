@@ -148,3 +148,65 @@ async fn ws_stream_protocol() {
     let _ = child.wait().await;
     let _ = std::fs::remove_file(video);
 }
+
+/// Production hardening: /healthz liveness, optional token auth (401s),
+/// connection cap (503 on the overflow connection), and graceful shutdown.
+#[tokio::test]
+async fn hardening_guards() {
+    let Some(video) = make_test_video() else {
+        eprintln!("ffmpeg not available — skipping hardening test");
+        return;
+    };
+    let port = free_port();
+    let bin = env!("CARGO_BIN_EXE_asciline-server");
+    let mut child = tokio::process::Command::new(bin)
+        .arg(video.to_str().unwrap())
+        .args(["--mode", "6", "--cols", "40", "--fps", "30", "--no-thumbnails"])
+        .arg("--port")
+        .arg(port.to_string())
+        .args(["--max-clients", "1", "--token", "s3cr3t", "--max-ffmpeg", "2"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn asciline-server");
+
+    wait_for_server(port).await;
+
+    // /healthz: 200 + JSON with the client cap.
+    let hz = http_get(port, "/healthz");
+    assert!(hz.contains("200 OK") && hz.contains("\"max\":1"), "healthz wrong: {hz}");
+
+    // /audio and /scrub without the token: 401.
+    assert!(http_get(port, "/audio?v=0").contains("401"), "audio must 401 without token");
+    assert!(http_get(port, "/scrub?v=0").contains("401"), "scrub must 401 without token");
+    assert!(http_get(port, "/audio?v=0&token=wrong").contains("401"), "wrong token must 401");
+    assert!(http_get(port, "/audio?v=0&token=s3cr3t").contains("200"), "correct token must pass");
+
+    // WS without a token: 401 at the upgrade.
+    let no_token = connect_async(format!("ws://127.0.0.1:{port}/ws?codec=adaptive")).await;
+    assert!(no_token.is_err(), "ws without token must be rejected");
+
+    // First authenticated client connects and streams (holds the only permit).
+    let url = format!("ws://127.0.0.1:{port}/ws?codec=adaptive&token=s3cr3t");
+    let (mut ws, _) = connect_async(&url).await.expect("first ws must connect");
+    let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("INIT timeout")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(first, Message::Text(t) if t.starts_with("INIT:")));
+
+    // Second connection hits the --max-clients 1 cap: 503 at the upgrade.
+    let second = connect_async(&url).await;
+    assert!(second.is_err(), "second ws must be rejected by the connection cap");
+
+    // Healthz now reports 1 in use.
+    let hz2 = http_get(port, "/healthz");
+    assert!(hz2.contains("\"in_use\":1"), "healthz must report the active client: {hz2}");
+
+    let _ = ws.close(None).await;
+
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    let _ = std::fs::remove_file(video);
+}

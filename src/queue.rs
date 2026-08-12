@@ -26,7 +26,14 @@ pub struct QueueEntry {
 }
 
 impl QueueEntry {
-    pub fn from_file(path: String, mode: u8, vol: u8, pixel: bool, rows: u32, cols: Option<u32>) -> QueueEntry {
+    pub fn from_file(
+        path: String,
+        mode: u8,
+        vol: u8,
+        pixel: bool,
+        rows: u32,
+        cols: Option<u32>,
+    ) -> QueueEntry {
         QueueEntry {
             video: path,
             mode,
@@ -104,7 +111,8 @@ pub fn load_playlist(path: &str, def: &QueueEntry) -> Result<Vec<QueueEntry>> {
 /// Scan a folder for video files, in filesystem (directory) order.
 pub fn load_folder(folder: &str, def: &QueueEntry) -> Result<Vec<QueueEntry>> {
     let mut entries = Vec::new();
-    let rd = fs::read_dir(folder).map_err(|e| anyhow::anyhow!("cannot read folder {folder:?}: {e}"))?;
+    let rd =
+        fs::read_dir(folder).map_err(|e| anyhow::anyhow!("cannot read folder {folder:?}: {e}"))?;
     for item in rd.flatten() {
         let path = item.path();
         if path.is_file() {
@@ -130,7 +138,10 @@ pub fn load_folder(folder: &str, def: &QueueEntry) -> Result<Vec<QueueEntry>> {
 pub fn resolve_video_path(video: &str) -> String {
     let candidates = [
         video.to_string(),
-        Path::new("videos").join(Path::new(video).file_name().unwrap_or_default()).to_string_lossy().into_owned(),
+        Path::new("videos")
+            .join(Path::new(video).file_name().unwrap_or_default())
+            .to_string_lossy()
+            .into_owned(),
     ];
     candidates
         .iter()
@@ -169,7 +180,13 @@ mod tests {
             ..e
         };
         let (c2, r2) = e2.resolve_cols_rows(1920, 1080);
-        assert!(c2 <= MAX_GRID_COLS && c2 > 0, "auto cols must stay bounded, got {c2}");
-        assert!(r2 <= MAX_GRID_ROWS && r2 > 0, "auto rows must stay bounded, got {r2}");
+        assert!(
+            c2 <= MAX_GRID_COLS && c2 > 0,
+            "auto cols must stay bounded, got {c2}"
+        );
+        assert!(
+            r2 <= MAX_GRID_ROWS && r2 > 0,
+            "auto rows must stay bounded, got {r2}"
+        );
     }
 }

@@ -29,8 +29,13 @@ fn make_test_video() -> Option<std::path::PathBuf> {
     let path = std::env::temp_dir().join(format!("asciline_e2e_{}.mp4", std::process::id()));
     let status = std::process::Command::new("ffmpeg")
         .args([
-            "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=1",
-            "-pix_fmt", "yuv420p",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=30:duration=1",
+            "-pix_fmt",
+            "yuv420p",
         ])
         .arg(&path)
         .stdout(Stdio::null())
@@ -50,7 +55,10 @@ fn free_port() -> u16 {
 
 async fn wait_for_server(port: u16) {
     for _ in 0..100 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -83,7 +91,15 @@ async fn ws_stream_protocol() {
     let bin = env!("CARGO_BIN_EXE_asciline-server");
     let mut child = tokio::process::Command::new(bin)
         .arg(video.to_str().unwrap())
-        .args(["--mode", "6", "--cols", "80", "--fps", "30", "--no-thumbnails"])
+        .args([
+            "--mode",
+            "6",
+            "--cols",
+            "80",
+            "--fps",
+            "30",
+            "--no-thumbnails",
+        ])
         .arg("--port")
         .arg(port.to_string())
         .stdout(Stdio::null())
@@ -95,11 +111,17 @@ async fn ws_stream_protocol() {
 
     // ── HTTP: root page + static assets ──
     let root = http_get(port, "/");
-    assert!(root.contains("200 OK") && root.to_lowercase().contains("asciline"), "root page broken");
+    assert!(
+        root.contains("200 OK") && root.to_lowercase().contains("asciline"),
+        "root page broken"
+    );
     let js = http_get(port, "/static/app.js");
     assert!(js.contains("200 OK"), "static app.js not served");
     let forbidden = http_get(port, "/static/secret.txt");
-    assert!(forbidden.contains("404"), "whitelist must block unknown files");
+    assert!(
+        forbidden.contains("404"),
+        "whitelist must block unknown files"
+    );
 
     // ── WebSocket: INIT + binary frames ──
     let url = format!("ws://127.0.0.1:{port}/ws?codec=adaptive");
@@ -121,7 +143,10 @@ async fn ws_stream_protocol() {
     let cols: usize = parts[3].parse().unwrap();
     let rows: usize = parts[4].parse().unwrap();
     assert_eq!(mode, 6);
-    assert!((fps - 30.0).abs() < 1e-6, "fps in INIT should be 30.0, got {fps}");
+    assert!(
+        (fps - 30.0).abs() < 1e-6,
+        "fps in INIT should be 30.0, got {fps}"
+    );
 
     let mut dec = CodecDecoder::new(4);
     let mut decoded = 0usize;
@@ -161,10 +186,25 @@ async fn hardening_guards() {
     let bin = env!("CARGO_BIN_EXE_asciline-server");
     let mut child = tokio::process::Command::new(bin)
         .arg(video.to_str().unwrap())
-        .args(["--mode", "6", "--cols", "40", "--fps", "30", "--no-thumbnails"])
+        .args([
+            "--mode",
+            "6",
+            "--cols",
+            "40",
+            "--fps",
+            "30",
+            "--no-thumbnails",
+        ])
         .arg("--port")
         .arg(port.to_string())
-        .args(["--max-clients", "1", "--token", "s3cr3t", "--max-ffmpeg", "2"])
+        .args([
+            "--max-clients",
+            "1",
+            "--token",
+            "s3cr3t",
+            "--max-ffmpeg",
+            "2",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -174,13 +214,28 @@ async fn hardening_guards() {
 
     // /healthz: 200 + JSON with the client cap.
     let hz = http_get(port, "/healthz");
-    assert!(hz.contains("200 OK") && hz.contains("\"max\":1"), "healthz wrong: {hz}");
+    assert!(
+        hz.contains("200 OK") && hz.contains("\"max\":1"),
+        "healthz wrong: {hz}"
+    );
 
     // /audio and /scrub without the token: 401.
-    assert!(http_get(port, "/audio?v=0").contains("401"), "audio must 401 without token");
-    assert!(http_get(port, "/scrub?v=0").contains("401"), "scrub must 401 without token");
-    assert!(http_get(port, "/audio?v=0&token=wrong").contains("401"), "wrong token must 401");
-    assert!(http_get(port, "/audio?v=0&token=s3cr3t").contains("200"), "correct token must pass");
+    assert!(
+        http_get(port, "/audio?v=0").contains("401"),
+        "audio must 401 without token"
+    );
+    assert!(
+        http_get(port, "/scrub?v=0").contains("401"),
+        "scrub must 401 without token"
+    );
+    assert!(
+        http_get(port, "/audio?v=0&token=wrong").contains("401"),
+        "wrong token must 401"
+    );
+    assert!(
+        http_get(port, "/audio?v=0&token=s3cr3t").contains("200"),
+        "correct token must pass"
+    );
 
     // WS without a token: 401 at the upgrade.
     let no_token = connect_async(format!("ws://127.0.0.1:{port}/ws?codec=adaptive")).await;
@@ -198,11 +253,17 @@ async fn hardening_guards() {
 
     // Second connection hits the --max-clients 1 cap: 503 at the upgrade.
     let second = connect_async(&url).await;
-    assert!(second.is_err(), "second ws must be rejected by the connection cap");
+    assert!(
+        second.is_err(),
+        "second ws must be rejected by the connection cap"
+    );
 
     // Healthz now reports 1 in use.
     let hz2 = http_get(port, "/healthz");
-    assert!(hz2.contains("\"in_use\":1"), "healthz must report the active client: {hz2}");
+    assert!(
+        hz2.contains("\"in_use\":1"),
+        "healthz must report the active client: {hz2}"
+    );
 
     let _ = ws.close(None).await;
 

@@ -110,8 +110,8 @@ fn main() -> Result<()> {
         bail!("file not found: {:?}", args.video);
     }
 
-    let info = probe_video(&args.video, false)
-        .with_context(|| format!("cannot open {:?}", args.video))?;
+    let info =
+        probe_video(&args.video, false).with_context(|| format!("cannot open {:?}", args.video))?;
 
     // Target FPS: explicit --fps, else the original's decimation (cap ~30).
     let source_fps = info.fps.max(1.0);
@@ -163,15 +163,12 @@ fn main() -> Result<()> {
     };
 
     // ── audio extraction (best-effort, like the original) ──
-    let base = args
-        .out
-        .clone()
-        .unwrap_or_else(|| {
-            std::path::Path::new(&args.video)
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "output".into())
-        });
+    let base = args.out.clone().unwrap_or_else(|| {
+        std::path::Path::new(&args.video)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "output".into())
+    });
     let out_dir = PathBuf::from(&args.out_dir);
     std::fs::create_dir_all(&out_dir).ok();
     let ascf_path = out_dir.join(format!("{base}.ascf"));
@@ -205,10 +202,8 @@ fn main() -> Result<()> {
     // Adaptive pixel quality report: only when the lossless path is actually
     // lossy AND the report wasn't suppressed — `--no-quality` must skip the
     // computation too (it is the dominant per-frame cost when enabled).
-    let adaptive_quality = !profile
-        && pixel
-        && !args.no_quality
-        && (args.tolerance > 0 || args.quantize > 0);
+    let adaptive_quality =
+        !profile && pixel && !args.no_quality && (args.tolerance > 0 || args.quantize > 0);
     let mut adaptive_stats = QualityStats::new();
     let mut profile_enc = if profile {
         let mut pe = ProfileEncoder::new(cols as usize, rows as usize, args.qf.clamp(1, 100));
@@ -244,7 +239,8 @@ fn main() -> Result<()> {
     let pid = std::sync::atomic::AtomicU32::new(0);
     let mut reader = FrameReader::new(&params, &pid)?;
 
-    let file = File::create(&ascf_path).with_context(|| format!("cannot create {:?}", ascf_path))?;
+    let file =
+        File::create(&ascf_path).with_context(|| format!("cannot create {:?}", ascf_path))?;
     let mut out = BufWriter::new(file);
 
     let header = AscfHeader {
@@ -286,8 +282,7 @@ fn main() -> Result<()> {
                 // enc.prev() is the SHOWN framebuffer — what players display
                 // after delta/tolerance skipping (and colour quantization).
                 if let Some(shown) = enc.prev() {
-                    let (py, sy, pr) =
-                        rgb_vs_bgr(&rgb, shown, cols as usize, rows as usize);
+                    let (py, sy, pr) = rgb_vs_bgr(&rgb, shown, cols as usize, rows as usize);
                     adaptive_stats.push(frame_index as u64, py, sy, pr);
                 }
             }
@@ -448,7 +443,15 @@ fn extract_audio(video_path: &str, output_path: &std::path::Path) {
         .arg("-y")
         .arg("-i")
         .arg(video_path)
-        .args(["-vn", "-acodec", "libmp3lame", "-ab", "128k", "-ar", "44100"])
+        .args([
+            "-vn",
+            "-acodec",
+            "libmp3lame",
+            "-ab",
+            "128k",
+            "-ar",
+            "44100",
+        ])
         .arg(output_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

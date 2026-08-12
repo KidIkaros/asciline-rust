@@ -112,7 +112,11 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     // Python-compatible guardrails
-    let mode = if args.pixel && args.mode == 1 { 6 } else { args.mode };
+    let mode = if args.pixel && args.mode == 1 {
+        6
+    } else {
+        args.mode
+    };
     let pixel = args.pixel;
     if pixel && args.quality != "lossless" {
         anyhow::bail!("--pixel mode sends raw data and does not support the adaptive codec. Remove the --quality flag.");
@@ -128,7 +132,8 @@ fn main() -> Result<()> {
         other => anyhow::bail!("unknown --quality {other:?} (lossless|high|balanced|low)"),
     };
 
-    let defaults = QueueEntry::from_file(String::new(), mode, args.vol, pixel, args.rows, args.cols);
+    let defaults =
+        QueueEntry::from_file(String::new(), mode, args.vol, pixel, args.rows, args.cols);
 
     // ── Build the queue (priority: webcam > playlist > folder > single file) ──
     let queue: Vec<QueueEntry> = if args.webcam {
@@ -186,7 +191,18 @@ fn main() -> Result<()> {
             println!("> Warming up cache for first video...");
             let _ = asciline::video::probe_video(&first.video, false);
             let _ = std::process::Command::new("ffmpeg")
-                .args(["-nostdin", "-v", "error", "-i", &first.video, "-frames:v", "1", "-f", "null", "-"])
+                .args([
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    "-i",
+                    &first.video,
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "null",
+                    "-",
+                ])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
@@ -198,15 +214,34 @@ fn main() -> Result<()> {
     println!("{}", banner());
     println!(" {}", "═".repeat(55));
     println!(" > Queue      : {} video(s)", queue.len());
-    println!(" > Loop       : {}", if args.loop_playback { "ON" } else { "OFF" });
+    println!(
+        " > Loop       : {}",
+        if args.loop_playback { "ON" } else { "OFF" }
+    );
     println!(
         " > Resolution  : {}x({})",
         args.cols.unwrap_or(if pixel { 450 } else { 200 }),
-        if args.rows > 0 { args.rows.to_string() } else { "auto".into() }
+        if args.rows > 0 {
+            args.rows.to_string()
+        } else {
+            "auto".into()
+        }
     );
-    println!(" > Target FPS : {}", args.fps.map(|f| f.to_string()).unwrap_or_else(|| "source (no cap)".into()));
+    println!(
+        " > Target FPS : {}",
+        args.fps
+            .map(|f| f.to_string())
+            .unwrap_or_else(|| "source (no cap)".into())
+    );
     for (i, e) in queue.iter().enumerate() {
-        println!("  {:2}. {}  (mode={}{} vol={})", i + 1, e.video, e.mode, if e.pixel { " [PIXEL]" } else { "" }, e.vol);
+        println!(
+            "  {:2}. {}  (mode={}{} vol={})",
+            i + 1,
+            e.video,
+            e.mode,
+            if e.pixel { " [PIXEL]" } else { "" },
+            e.vol
+        );
     }
     println!(" {}", "═".repeat(55));
     println!();
@@ -276,7 +311,10 @@ fn find_web_dir() -> PathBuf {
         PathBuf::from("web"),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web"),
     ];
-    candidates.into_iter().find(|p| p.join("index.html").exists()).unwrap_or_else(|| PathBuf::from("web"))
+    candidates
+        .into_iter()
+        .find(|p| p.join("index.html").exists())
+        .unwrap_or_else(|| PathBuf::from("web"))
 }
 
 fn banner() -> &'static str {

@@ -45,7 +45,8 @@ fn play_stream(data: &[u8]) {
     let mut pdec = ProfileDecoder::new();
     let mut off = hdr_len;
     while off + 4 <= data.len() {
-        let len = u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]) as usize;
+        let len =
+            u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]) as usize;
         off += 4;
         if len > MAX_ASCF_RECORD || off + len > data.len() {
             return; // player bails on oversized/truncated records
@@ -155,7 +156,10 @@ fn rle_expansion_is_capped() {
     let mut msg = vec![0u8, 0, 0, 0, 3];
     msg.extend_from_slice(&zlib_compress(&body, 6));
     let mut dec = CodecDecoder::new(4);
-    assert!(dec.decode(&msg).is_err(), "RLE expansion must hit the output cap");
+    assert!(
+        dec.decode(&msg).is_err(),
+        "RLE expansion must hit the output cap"
+    );
 }
 
 /// A crafted profile keyframe declares its grid in the payload as u16 dims;
@@ -167,7 +171,10 @@ fn profile_keyframe_huge_grid_is_rejected() {
     let mut msg = vec![0u8, 0, 0, 0, 4];
     msg.extend_from_slice(&zlib_compress(&payload, 6));
     let mut dec = ProfileDecoder::new();
-    assert!(dec.decode(&msg).is_err(), "a 65535x65535 grid must be rejected, not OOM");
+    assert!(
+        dec.decode(&msg).is_err(),
+        "a 65535x65535 grid must be rejected, not OOM"
+    );
 
     // zero dims are invalid too
     let mut payload0 = vec![0u8, 70, 0, 0, 0, 0];
@@ -184,7 +191,10 @@ fn profile_keyframe_huge_grid_is_rejected() {
 fn zlib_bomb_is_capped() {
     let big = vec![0u8; 70 << 20];
     let bomb = zlib_compress(&big, 6);
-    assert!(bomb.len() < (1 << 20), "test setup: zeros must compress hard");
+    assert!(
+        bomb.len() < (1 << 20),
+        "test setup: zeros must compress hard"
+    );
     let mut msg = vec![0u8, 0, 0, 0, 1]; // tag 1 = ZLIB
     msg.extend_from_slice(&bomb);
     let mut dec = CodecDecoder::new(4);

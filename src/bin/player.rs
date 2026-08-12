@@ -86,7 +86,11 @@ fn main() -> Result<()> {
     let palette: Vec<char> = args
         .palette
         .clone()
-        .map(|p| p.split_whitespace().filter_map(|c| c.chars().next()).collect())
+        .map(|p| {
+            p.split_whitespace()
+                .filter_map(|c| c.chars().next())
+                .collect()
+        })
         .unwrap_or_else(|| asciline::DEFAULT_PALETTE.chars().collect());
 
     if !args.webcam && args.video.is_empty() {
@@ -156,7 +160,13 @@ fn compute_grid(t_cols: u32, t_lines: u32, vid_w: u32, vid_h: u32, fixed_cols: u
     }
 }
 
-fn play_video(src: &str, args: &Args, mapper: &Mapper, quantize_bits: u8, stop: &Arc<AtomicBool>) -> Result<()> {
+fn play_video(
+    src: &str,
+    args: &Args,
+    mapper: &Mapper,
+    quantize_bits: u8,
+    stop: &Arc<AtomicBool>,
+) -> Result<()> {
     let info = probe_video(src, args.webcam).with_context(|| format!("cannot open {src:?}"))?;
     let source_fps = if args.webcam {
         args.webcam_fps as f64
@@ -169,18 +179,32 @@ fn play_video(src: &str, args: &Args, mapper: &Mapper, quantize_bits: u8, stop: 
     let (t_cols, t_lines) = crossterm::terminal::size()
         .map(|(c, l)| (c as u32, l as u32))
         .unwrap_or((220, 50));
-    let (cols, rows) = compute_grid(t_cols, t_lines.saturating_sub(2), info.width, info.height, args.cols);
+    let (cols, rows) = compute_grid(
+        t_cols,
+        t_lines.saturating_sub(2),
+        info.width,
+        info.height,
+        args.cols,
+    );
     let pad_y = (t_lines.saturating_sub(2).saturating_sub(rows)) / 2;
     let pad_x = " ".repeat((t_cols.saturating_sub(cols) / 2) as usize);
 
-    let orientation = if info.height > info.width { "PORTRAIT" } else { "LANDSCAPE" };
+    let orientation = if info.height > info.width {
+        "PORTRAIT"
+    } else {
+        "LANDSCAPE"
+    };
     print!(
         "{CLEAR_SCREEN}\x1b[1m[ASCII Player — Rust]\x1b[0m\n  Orientation : {orientation}\n  Video       : {}x{}\n  ASCII       : {cols}x{rows}\n  FPS         : {:.1}\n  Quantization: {} levels/channel\n  Exit        : Ctrl+C\n\n",
         info.width, info.height, source_fps, 2u32.pow(8 - quantize_bits.min(7) as u32)
     );
     let _ = std::io::stdout().flush();
 
-    let target_fps = if args.webcam { args.webcam_fps as f64 } else { args.fps.unwrap_or(source_fps) };
+    let target_fps = if args.webcam {
+        args.webcam_fps as f64
+    } else {
+        args.fps.unwrap_or(source_fps)
+    };
     let params = SourceParams {
         src: src.to_string(),
         is_webcam: args.webcam,

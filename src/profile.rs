@@ -81,16 +81,16 @@ const ZZ: [usize; 64] = [
 
 /// Luma quantization table (JPEG style).
 const QL_BASE: [i64; 64] = [
-    16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69,
-    56, 14, 17, 22, 29, 51, 87, 80, 62, 18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104,
-    113, 92, 49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99,
+    16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69, 56,
+    14, 17, 22, 29, 51, 87, 80, 62, 18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113,
+    92, 49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99,
 ];
 
 /// Chroma quantization table (JPEG style).
 const QC_BASE: [i64; 64] = [
-    17, 18, 24, 47, 99, 99, 99, 99, 18, 21, 26, 66, 99, 99, 99, 99, 24, 26, 56, 99, 99, 99, 99,
-    99, 47, 66, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
-    99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+    17, 18, 24, 47, 99, 99, 99, 99, 18, 21, 26, 66, 99, 99, 99, 99, 24, 26, 56, 99, 99, 99, 99, 99,
+    47, 66, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
 ];
 
 /// The orthonormal float DCT-II basis `F` (matches `codec.py` `_F` exactly).
@@ -225,7 +225,14 @@ impl ProfileEncoder {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with(w: usize, h: usize, qf: u8, dz: f64, skip_t: f64, level: u32) -> ProfileEncoder {
+    pub fn new_with(
+        w: usize,
+        h: usize,
+        qf: u8,
+        dz: f64,
+        skip_t: f64,
+        level: u32,
+    ) -> ProfileEncoder {
         assert!(
             w.is_multiple_of(16) && h.is_multiple_of(16),
             "profile requires cols and rows multiples of 16 (compiler pads)"
@@ -258,7 +265,11 @@ impl ProfileEncoder {
 
     /// Encode one BGR frame → `(wire message, shown BGR bytes)`.
     pub fn encode(&mut self, frame_bgr: &[u8]) -> (Vec<u8>, Vec<u8>) {
-        assert_eq!(frame_bgr.len(), self.w * self.h * 3, "profile frame size mismatch");
+        assert_eq!(
+            frame_bgr.len(),
+            self.w * self.h * 3,
+            "profile frame size mismatch"
+        );
 
         // ── RGB → YUV 4:2:0 (float32 math, bit-exact with codec.py) ──
         let w = self.w;
@@ -272,15 +283,13 @@ impl ProfileEncoder {
 
         // Luma: one f32 left-fold per pixel — parallel over pixels (each output
         // depends only on its own input, so results are bit-identical to serial).
-        y.par_iter_mut()
-            .enumerate()
-            .for_each(|(i, out)| {
-                let b = frame_bgr[i * 3] as f32;
-                let g = frame_bgr[i * 3 + 1] as f32;
-                let r = frame_bgr[i * 3 + 2] as f32;
-                let v = (0.299 * r + 0.587 * g) + 0.114 * b; // left fold in f32
-                *out = (v.clamp(0.0, 255.0)) as u8;
-            });
+        y.par_iter_mut().enumerate().for_each(|(i, out)| {
+            let b = frame_bgr[i * 3] as f32;
+            let g = frame_bgr[i * 3 + 1] as f32;
+            let r = frame_bgr[i * 3 + 2] as f32;
+            let v = (0.299 * r + 0.587 * g) + 0.114 * b; // left fold in f32
+            *out = (v.clamp(0.0, 255.0)) as u8;
+        });
 
         // Chroma: each 2×2 block is independent — parallel over blocks. Each
         // pixel computes its own (cb, cr) pair, collected in order (bit-exact
@@ -295,7 +304,10 @@ impl ProfileEncoder {
                 // bit-for-bit with the same association in f32.
                 let mut acc_cb = [0.0f32; 4];
                 let mut acc_cr = [0.0f32; 4];
-                for (i, (dy, dx)) in [(0usize, 0usize), (0, 1), (1, 0), (1, 1)].iter().enumerate() {
+                for (i, (dy, dx)) in [(0usize, 0usize), (0, 1), (1, 0), (1, 1)]
+                    .iter()
+                    .enumerate()
+                {
                     let idx = ((cy * 2 + dy) * w + (cx * 2 + dx)) * 3;
                     let b = frame_bgr[idx] as f32;
                     let g = frame_bgr[idx + 1] as f32;
@@ -578,10 +590,8 @@ fn enc_block(
     }
 
     // skip decision (inter only)
-    let is_skip = ftype == 1
-        && mvx == 0
-        && mvy == 0
-        && (all_zero || (skip_t > 0.0 && sse < skip_t));
+    let is_skip =
+        ftype == 1 && mvx == 0 && mvy == 0 && (all_zero || (skip_t > 0.0 && sse < skip_t));
 
     // reconstruct
     let mut rec_b = [[0u8; 8]; 8];
@@ -687,7 +697,11 @@ fn enc_plane(
         let mut prev_pos: i32 = -1;
         for k in 0..64usize {
             let id = ZZ[k];
-            let v = if k == 0 { dc_diff } else { blk.cq[id / 8][id % 8] };
+            let v = if k == 0 {
+                dc_diff
+            } else {
+                blk.cq[id / 8][id % 8]
+            };
             if v != 0 {
                 assert!(
                     (-32767..=32767).contains(&v),
@@ -728,23 +742,21 @@ fn yuv_to_bgr(y: &[u8], cb: &[u8], cr: &[u8], w: usize, h: usize) -> Vec<u8> {
     let mut out = vec![0u8; w * h * 3];
     // Each output pixel depends only on its own luma/chroma samples and writes
     // a disjoint 3-byte run — parallel over pixels, bit-identical to serial.
-    out.par_chunks_exact_mut(3)
-        .enumerate()
-        .for_each(|(i, px)| {
-            let yy = i / w;
-            let x = i % w;
-            let cy = yy >> 1;
-            let cx = x >> 1;
-            let yv = y[yy * w + x] as i32;
-            let cbv = cb[cy * cw + cx] as i32 - 128;
-            let crv = cr[cy * cw + cx] as i32 - 128;
-            let r = yv + ((359 * crv + 128) >> 8);
-            let g = yv - ((88 * cbv + 183 * crv + 128) >> 8);
-            let b = yv + ((454 * cbv + 128) >> 8);
-            px[0] = b.clamp(0, 255) as u8;
-            px[1] = g.clamp(0, 255) as u8;
-            px[2] = r.clamp(0, 255) as u8;
-        });
+    out.par_chunks_exact_mut(3).enumerate().for_each(|(i, px)| {
+        let yy = i / w;
+        let x = i % w;
+        let cy = yy >> 1;
+        let cx = x >> 1;
+        let yv = y[yy * w + x] as i32;
+        let cbv = cb[cy * cw + cx] as i32 - 128;
+        let crv = cr[cy * cw + cx] as i32 - 128;
+        let r = yv + ((359 * crv + 128) >> 8);
+        let g = yv - ((88 * cbv + 183 * crv + 128) >> 8);
+        let b = yv + ((454 * cbv + 128) >> 8);
+        px[0] = b.clamp(0, 255) as u8;
+        px[1] = g.clamp(0, 255) as u8;
+        px[2] = r.clamp(0, 255) as u8;
+    });
     out
 }
 
@@ -815,13 +827,7 @@ impl ProfileDecoder {
             if need_alloc {
                 let cw = w / 2;
                 let ch = h / 2;
-                let mk = || {
-                    [
-                        Plane::new(w, h),
-                        Plane::new(cw, ch),
-                        Plane::new(cw, ch),
-                    ]
-                };
+                let mk = || [Plane::new(w, h), Plane::new(cw, ch), Plane::new(cw, ch)];
                 self.cur = Some(mk());
                 self.spare = Some(mk());
             }
@@ -953,8 +959,7 @@ fn dec_plane(
                             let sy = ((by * 8 + y) as i32 + dy).clamp(0, h32 - 1) as usize;
                             cur.buf[sy * w + sx] as i64
                         };
-                        out.buf[(by * 8 + y) * w + bx * 8 + x] =
-                            (pred + flat).clamp(0, 255) as u8;
+                        out.buf[(by * 8 + y) * w + bx * 8 + x] = (pred + flat).clamp(0, 255) as u8;
                     }
                 }
             } else {
@@ -1001,7 +1006,9 @@ mod tests {
         // deterministic LCG noise + moving blob
         let mut state = seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(i as u64);
         let mut next = move || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 33) as u8
         };
         let mut f = vec![0u8; w * h * 3];
@@ -1115,7 +1122,11 @@ mod tests {
 
         // scene change: luma deviates massively → forced keyframe
         let (m2, s2) = enc.encode(&b);
-        assert_eq!(dec.decode(&m2).unwrap().1, s2, "decoder must reproduce the forced keyframe");
+        assert_eq!(
+            dec.decode(&m2).unwrap().1,
+            s2,
+            "decoder must reproduce the forced keyframe"
+        );
         assert_eq!(payload_ftype(&m2), 0, "scene change must force a keyframe");
     }
 
@@ -1132,7 +1143,11 @@ mod tests {
         enc.encode(&a);
         enc.encode(&a);
         let (m2, _) = enc.encode(&b);
-        assert_eq!(payload_ftype(&m2), 1, "without detection the cut frame stays inter");
+        assert_eq!(
+            payload_ftype(&m2),
+            1,
+            "without detection the cut frame stays inter"
+        );
     }
 
     #[test]
@@ -1156,8 +1171,14 @@ mod tests {
         let multi = run(8, frames);
         assert_eq!(single.len(), multi.len());
         for (i, (a, b)) in single.iter().zip(&multi).enumerate() {
-            assert_eq!(a.0, b.0, "frame {i}: wire bytes differ across thread counts");
-            assert_eq!(a.1, b.1, "frame {i}: shown frame differs across thread counts");
+            assert_eq!(
+                a.0, b.0,
+                "frame {i}: wire bytes differ across thread counts"
+            );
+            assert_eq!(
+                a.1, b.1,
+                "frame {i}: shown frame differs across thread counts"
+            );
         }
     }
 

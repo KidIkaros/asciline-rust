@@ -64,9 +64,33 @@ thumbnails, pause/seek/filter/reinit commands, backpressure frame-dropping).
 --vol 0-5      audio volume (0 = no ffmpeg audio run at all)
 --loop         loop the queue
 --playlist/--folder/--webcam   sources
---host/--port  bind address
+--host/--port  bind address (default 127.0.0.1:8000)
+--max-clients  concurrent WebSocket clients (default 8; each owns an ffmpeg +
+               decode thread — overflow gets 503)
+--max-ffmpeg   concurrent ffmpeg spawns for /audio + scrub builds (default 4)
+--token SECRET optional auth: /ws, /audio, /scrub* require ?token=SECRET
 --debug        RAW vs WIRE bandwidth logging
 ```
+
+`RUST_LOG=info asciline-server ...` enables tracing lifecycle output; `GET
+/healthz` reports liveness + client count for orchestrators.
+
+### Production deployment
+
+```bash
+# Docker (binary + ffmpeg, non-root user, healthcheck)
+docker build -t asciline-server .
+docker run -p 8000:8000 -v /path/to/videos:/srv/asciline/videos \
+  asciline-server --folder videos --cols 240 --loop
+
+# install.sh (cargo build + copy to ~/.local/bin)
+./install.sh
+```
+
+See [SECURITY.md](SECURITY.md) for the trust model: the server binds
+`127.0.0.1` by default, checks WS `Origin` (anti-CSWSH), and enforces
+connection/ffmpeg caps. Use `--token` and a TLS-terminating reverse proxy when
+exposing it beyond localhost — there is no built-in TLS.
 
 ## 2. Terminal player (`ascii_video_player2.py`)
 
@@ -230,7 +254,10 @@ in the bit-exact decode direction, which is what the tests verify.
 ## Validation
 
 ```bash
-cargo test                    # 40 unit tests: codec + profile round-trips (incl. DELTA wire format + tolerance semantics + scene-cut keyframes + thread-count determinism), mapper, filters, protocol, quality
+cargo test                    # 52 tests: 41 unit + 11 malformed-input fuzz/proptests
+                              # (codec + profile round-trips incl. DELTA wire format,
+                              #  tolerance semantics, scene-cut keyframes, thread-count
+                              #  determinism, decoder hardening regressions, …)
 
 `asciline-compile --profile --quality-threshold 35 clip.mp4` # fail CI if mean PSNR-Y < 35 dB
 
@@ -247,7 +274,10 @@ cargo test --test decode_profile_vectors -- --ignored  # Rust ProfileDecoder ↔
 cargo test --test roundtrip_profile -- --ignored       # Rust ProfileEncoder round-trip + vectors
 node experiments/check_profile_vectors.js              # Rust ProfileEncoder ↔ shipped codec.js
 
-cargo test --test e2e_server -- --nocapture             # boots the real server, WS INIT + frames
+cargo test --test e2e_server -- --nocapture             # boots the real server, WS INIT + frames,
+                                                         # plus the hardening guards (healthz, token 401s,
+                                                         # --max-clients 503)
+cargo test --test fuzz_malformed                        # proptest: no input may panic a decoder
 cargo test --release --test bench_encode -- --ignored --nocapture   # map+encode benchmark
 python3 experiments/bench_python.py                     # same benchmark for the Python stage
 node experiments/fps_count.js <port> 3                  # measure live streamed fps

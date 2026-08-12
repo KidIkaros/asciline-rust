@@ -79,20 +79,21 @@ pub fn zlib_decompress(data: &[u8]) -> Result<Vec<u8>> {
 
 /// Run-length encode a whole framebuffer into `[u16 count LE][cell bytes]` runs.
 /// Runs longer than 65535 are split, like the Python fallback path.
-fn rle_encode(frame: &[u8], cell_bytes: usize) -> Vec<u8> {        let mut out = Vec::new();
-        let n_cells = frame.len() / cell_bytes;
-        let mut i = 0usize;
-        while i < n_cells {
-            let cell = &frame[i * cell_bytes..(i + 1) * cell_bytes];
-            let mut j = i + 1;
-            while j < n_cells && j - i < 65535 && &frame[j * cell_bytes..(j + 1) * cell_bytes] == cell {
-                j += 1;
-            }
-            out.extend_from_slice(&((j - i) as u16).to_le_bytes()); // u16 count, little-endian
-            out.extend_from_slice(cell);
-            i = j;
+fn rle_encode(frame: &[u8], cell_bytes: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let n_cells = frame.len() / cell_bytes;
+    let mut i = 0usize;
+    while i < n_cells {
+        let cell = &frame[i * cell_bytes..(i + 1) * cell_bytes];
+        let mut j = i + 1;
+        while j < n_cells && j - i < 65535 && &frame[j * cell_bytes..(j + 1) * cell_bytes] == cell {
+            j += 1;
         }
-        out
+        out.extend_from_slice(&((j - i) as u16).to_le_bytes()); // u16 count, little-endian
+        out.extend_from_slice(cell);
+        i = j;
+    }
+    out
 }
 
 fn write_message(out: &mut Vec<u8>, frame_index: u32, tag: u8, payload: &[u8]) {
@@ -162,7 +163,11 @@ impl CodecEncoder {
     /// Encode one framebuffer. Returns the wire message and advances internal state.
     pub fn encode(&mut self, frame: &[u8], frame_index: u32) -> Vec<u8> {
         let keyframe = self.prev.is_none() || frame_index.is_multiple_of(self.keyframe_interval);
-        let same_size = self.prev.as_ref().map(|p| p.len() == frame.len()).unwrap_or(false);
+        let same_size = self
+            .prev
+            .as_ref()
+            .map(|p| p.len() == frame.len())
+            .unwrap_or(false);
 
         if keyframe || !same_size {
             let msg = self.encode_full(frame, frame_index);
@@ -468,7 +473,10 @@ mod tests {
             let (_, shown) = dec.decode(&msg).unwrap();
             assert_eq!(shown, f, "frame {i} must round-trip exactly through DELTA");
         }
-        assert!(delta_seen, "static+blob content must actually emit DELTA frames");
+        assert!(
+            delta_seen,
+            "static+blob content must actually emit DELTA frames"
+        );
     }
 
     #[test]
@@ -495,7 +503,10 @@ mod tests {
             let (_, out) = dec.decode(&msg).unwrap();
             assert_eq!(out, f, "frame {i} must round-trip exactly");
         }
-        assert!(delta_seen, "moving 2x2 ball must actually emit DELTA frames");
+        assert!(
+            delta_seen,
+            "moving 2x2 ball must actually emit DELTA frames"
+        );
     }
 
     #[test]
@@ -515,7 +526,10 @@ mod tests {
             px[0] = px[0].wrapping_add(5);
         }
         let msg = enc.encode(&f, 1);
-        assert_eq!(msg[4], TAG_DELTA, "sub-tolerance drift must encode as DELTA");
+        assert_eq!(
+            msg[4], TAG_DELTA,
+            "sub-tolerance drift must encode as DELTA"
+        );
         let (_, shown) = dec.decode(&msg).unwrap();
         assert_eq!(
             shown,
@@ -549,13 +563,16 @@ mod tests {
         let mut dec = CodecDecoder::new(4);
         let msg0 = enc.encode(&fb, 0);
         dec.decode(&msg0).unwrap(); // prime the decoder with the keyframe
-        // jitter colours within tolerance (<=8): no cell crosses the drift budget,
-        // so the wire gets a zero-cell DELTA and the client keeps its previous view.
+                                    // jitter colours within tolerance (<=8): no cell crosses the drift budget,
+                                    // so the wire gets a zero-cell DELTA and the client keeps its previous view.
         for i in (1..fb.len()).step_by(4) {
             fb[i] = fb[i].saturating_add(5);
         }
         let msg = enc.encode(&fb, 1);
-        assert_eq!(msg[4], TAG_DELTA, "sub-tolerance colour drift must encode as an empty DELTA");
+        assert_eq!(
+            msg[4], TAG_DELTA,
+            "sub-tolerance colour drift must encode as an empty DELTA"
+        );
         let (_, shown) = dec.decode(&msg).unwrap();
         // chars stay exact against the true frame; colours lag by <= 8 per channel
         for (s, t) in shown.chunks_exact(4).zip(fb.chunks_exact(4)) {

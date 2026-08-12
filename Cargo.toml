@@ -58,6 +58,8 @@ ctrlc = "3"
 
 [dev-dependencies]
 tokio-tungstenite = "0.26"
+# Property-based malformed-input harnesses for the decoders (stable, no fuzz crate)
+proptest = "1"
 
 [profile.release]
 opt-level = 3

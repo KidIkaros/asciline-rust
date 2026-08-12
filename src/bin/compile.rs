@@ -125,9 +125,17 @@ fn main() -> Result<()> {
     };
 
     let (cols, rows) = if args.rows > 0 {
-        (args.cols, args.rows)
+        (
+            args.cols.clamp(1, asciline::protocol::MAX_GRID_COLS),
+            args.rows.clamp(1, asciline::protocol::MAX_GRID_ROWS),
+        )
     } else {
-        asciline::protocol::calc_auto_dimensions(args.cols, info.width, info.height, pixel)
+        asciline::protocol::calc_auto_dimensions(
+            args.cols.clamp(1, asciline::protocol::MAX_GRID_COLS),
+            info.width,
+            info.height,
+            pixel,
+        )
     };
     println!(
         "[Compiler] {}x{} → grid {}x{} | mode={} | pixel={} | fps={:.3}",

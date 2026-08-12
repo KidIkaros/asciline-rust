@@ -45,10 +45,31 @@ pub fn zlib_compress(data: &[u8], level: u32) -> Vec<u8> {
     enc.finish().expect("zlib finish")
 }
 
+/// Cap on a single decompressed frame payload. Legitimate frames are at most a
+/// few MB (a 2048×2048 pixel grid is ~12.6 MB raw); 64 MiB bounds any real
+/// stream while stopping decompression bombs (a few KB of zlib can expand to
+/// gigabytes) from exhausting memory in the decoders.
+pub const MAX_DECOMPRESSED: usize = 64 << 20;
+
+/// Inflate with a hard size cap. Checksum/truncation errors still surface
+/// exactly as before (we read to `Ok(0)`, then stop); the only behavior change
+/// is that output over `MAX_DECOMPRESSED` fails instead of allocating forever.
 pub fn zlib_decompress(data: &[u8]) -> Result<Vec<u8>> {
     let mut dec = flate2::read::ZlibDecoder::new(data);
-    let mut out = Vec::with_capacity(data.len() * 4);
-    dec.read_to_end(&mut out)?;
+    let mut out = Vec::with_capacity(data.len().saturating_mul(4).min(1 << 20));
+    let mut buf = [0u8; 65536];
+    loop {
+        match dec.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                out.extend_from_slice(&buf[..n]);
+                if out.len() > MAX_DECOMPRESSED {
+                    bail!("zlib output exceeds {} bytes", MAX_DECOMPRESSED);
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
     Ok(out)
 }
 
@@ -322,8 +343,19 @@ impl CodecDecoder {
                 let mut frame = Vec::new();
                 let mut off = 0usize;
                 while off < body.len() {
+                    // Every run must be fully present — slicing without this
+                    // check panics on a truncated final run (`off + 2 + cell`
+                    // past the end), which a malformed frame used to trigger.
+                    if off + 2 + cell > body.len() {
+                        bail!("RLE run truncated at offset {off}");
+                    }
                     let count = u16::from_le_bytes([body[off], body[off + 1]]) as usize;
                     let val = &body[off + 2..off + 2 + cell];
+                    // Cap the expanded output too: a few run headers can claim
+                    // 65535 cells each, i.e. a tiny body → hundreds of MB.
+                    if frame.len().saturating_add(count * cell) > MAX_DECOMPRESSED {
+                        bail!("RLE frame exceeds {} bytes", MAX_DECOMPRESSED);
+                    }
                     for _ in 0..count {
                         frame.extend_from_slice(val);
                     }

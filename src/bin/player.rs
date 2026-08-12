@@ -27,6 +27,10 @@ use asciline::video::{probe_video, FrameReader, SourceParams};
 use clap::Parser;
 
 const CHAR_RATIO: f64 = 0.45;
+/// Cap on a single `.ascf` record length (read before allocating the buffer).
+/// Legitimate frames are a few MB at most; a malformed file must not be able
+/// to claim a multi-GB record and OOM the player.
+const MAX_ASCF_RECORD: usize = 64 << 20;
 
 // terminal control sequences (same as the Python original)
 const CURSOR_HOME: &str = "\x1b[H";
@@ -260,6 +264,9 @@ fn play_ascf(path: &str, stop: &Arc<AtomicBool>) -> Result<()> {
             break; // EOF
         }
         let len = u32::from_be_bytes(len_buf) as usize;
+        if len > MAX_ASCF_RECORD {
+            bail!("ascf record too large ({len} bytes)");
+        }
         let mut msg = vec![0u8; len];
         reader.read_exact(&mut msg)?;
 

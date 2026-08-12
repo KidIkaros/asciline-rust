@@ -42,6 +42,12 @@ pub fn init_message(
     )
 }
 
+/// Hard cap on the configured grid: a playlist entry or CLI flag must not be
+/// able to ask ffmpeg for a gigantic scale (100k cols → GBs of frame traffic).
+/// Real deployments run 200-500 cols; 2000 is far beyond any sane config.
+pub const MAX_GRID_COLS: u32 = 2000;
+pub const MAX_GRID_ROWS: u32 = 2000;
+
 /// Grid auto-sizing, mirroring `calc_auto_dimensions`.
 /// ASCII mode chars are ~2× taller than wide → divide rows by 2; pixel cells are square.
 pub fn calc_auto_dimensions(cols: u32, vid_w: u32, vid_h: u32, pixel: bool) -> (u32, u32) {

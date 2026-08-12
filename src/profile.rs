@@ -51,6 +51,10 @@ const DEFAULT_SKIP_T: f64 = 256.0;
 /// The compiler enables this; `ProfileEncoder::new` keeps the original
 /// fixed-schedule behavior (0.0 disables detection) for bit-exact parity.
 pub const SCENE_CUT_MAD: f64 = 40.0;
+/// Cap on a decoded profile grid in pixels. The wire keyframe header declares
+/// u16 dims, so a crafted frame could claim 65535² (a multi-GB allocation);
+/// any real `.ascf` grid is far below 2048×2048 (the compiler pads to 16).
+const MAX_GRID_PIXELS: u64 = 1 << 22; // 4,194,304 px
 
 // ────────────────────────────────────────────────────────────────────────────
 // Deterministic constants (bit-exact with codec.py / codec.js)
@@ -794,6 +798,12 @@ impl ProfileDecoder {
             let qf = payload[1] as i64;
             let w = ((payload[2] as usize) << 8) | payload[3] as usize;
             let h = ((payload[4] as usize) << 8) | payload[5] as usize;
+            // Reject absurd grids BEFORE allocating planes: a crafted keyframe
+            // header previously requested up to 25 GB (65535² × 3 planes × 2
+            // buffers), which aborts on OOM.
+            if w == 0 || h == 0 || (w as u64) * (h as u64) > MAX_GRID_PIXELS {
+                bail!("profile grid {w}x{h} out of bounds");
+            }
             off = 6;
             let (ql, qc) = qtables(qf);
             self.ql = Some(ql);

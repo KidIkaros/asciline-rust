@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{bail, Result};
 use serde::Deserialize;
 
-use crate::protocol::calc_auto_dimensions;
+use crate::protocol::{calc_auto_dimensions, MAX_GRID_COLS, MAX_GRID_ROWS};
 
 const SUPPORTED_EXT: &[&str] = &[".mp4", ".mkv", ".avi", ".mov", ".webm"];
 
@@ -49,10 +49,15 @@ impl QueueEntry {
     }
 
     /// Resolve (cols, rows) for this entry against probed source dimensions.
+    /// Both values are clamped: a playlist entry or CLI flag must not be able
+    /// to ask ffmpeg for a gigantic grid.
     pub fn resolve_cols_rows(&self, vid_w: u32, vid_h: u32) -> (u32, u32) {
-        let cols = self.cols_override.unwrap_or_else(|| self.default_cols());
+        let cols = self
+            .cols_override
+            .unwrap_or_else(|| self.default_cols())
+            .clamp(1, MAX_GRID_COLS);
         if self.rows > 0 {
-            (cols, self.rows)
+            (cols, self.rows.clamp(1, MAX_GRID_ROWS))
         } else {
             calc_auto_dimensions(cols, vid_w, vid_h, self.pixel)
         }
@@ -132,4 +137,39 @@ pub fn resolve_video_path(video: &str) -> String {
         .find(|p| Path::new(p).exists())
         .cloned()
         .unwrap_or_else(|| video.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grid_dimensions_are_clamped() {
+        // playlist/CLI overrides must be clamped before reaching ffmpeg
+        let e = QueueEntry {
+            video: "x.mp4".into(),
+            mode: 6,
+            vol: 1,
+            pixel: true,
+            rows: 100_000,
+            cols_override: Some(100_000),
+            is_webcam: false,
+            mirror: false,
+            fallback_fps: 0.0,
+        };
+        let (c, r) = e.resolve_cols_rows(1920, 1080);
+        assert_eq!(c, MAX_GRID_COLS);
+        assert_eq!(r, MAX_GRID_ROWS);
+
+        // explicit rows are clamped too; auto rows keep the aspect logic and
+        // may rescale cols down to fit the pixel row cap — never blow up
+        let e2 = QueueEntry {
+            rows: 0,
+            cols_override: Some(100_000),
+            ..e
+        };
+        let (c2, r2) = e2.resolve_cols_rows(1920, 1080);
+        assert!(c2 <= MAX_GRID_COLS && c2 > 0, "auto cols must stay bounded, got {c2}");
+        assert!(r2 <= MAX_GRID_ROWS && r2 > 0, "auto rows must stay bounded, got {r2}");
+    }
 }

@@ -22,11 +22,14 @@ fn ffmpeg_available() -> bool {
         .unwrap_or(false)
 }
 
-fn make_test_video() -> Option<std::path::PathBuf> {
+/// Create a test video. `tag` distinguishes concurrent tests: they share a
+/// process but each needs its own temp file (one test's cleanup must not
+/// delete the other's while its server is still probing it).
+fn make_test_video(tag: &str) -> Option<std::path::PathBuf> {
     if !ffmpeg_available() {
         return None;
     }
-    let path = std::env::temp_dir().join(format!("asciline_e2e_{}.mp4", std::process::id()));
+    let path = std::env::temp_dir().join(format!("asciline_e2e_{}_{}.mp4", std::process::id(), tag));
     let status = std::process::Command::new("ffmpeg")
         .args([
             "-y",
@@ -82,7 +85,7 @@ fn http_get(port: u16, path: &str) -> String {
 
 #[tokio::test]
 async fn ws_stream_protocol() {
-    let Some(video) = make_test_video() else {
+    let Some(video) = make_test_video("ws") else {
         eprintln!("ffmpeg not available — skipping e2e server test");
         return;
     };
@@ -178,7 +181,7 @@ async fn ws_stream_protocol() {
 /// connection cap (503 on the overflow connection), and graceful shutdown.
 #[tokio::test]
 async fn hardening_guards() {
-    let Some(video) = make_test_video() else {
+    let Some(video) = make_test_video("hard") else {
         eprintln!("ffmpeg not available — skipping hardening test");
         return;
     };

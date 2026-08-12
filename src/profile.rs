@@ -31,6 +31,7 @@
 //! ```
 
 use anyhow::{bail, Result};
+use rayon::prelude::*;
 
 use crate::codec::{zlib_compress, zlib_decompress, TAG_PROFILE};
 use crate::quality::{psnr, ssim, QualityStats};
@@ -203,6 +204,11 @@ pub struct ProfileEncoder {
     /// reconstruction above which an inter frame is re-encoded as a keyframe.
     /// 0.0 = disabled (the original fixed every-48-frames schedule).
     pub scene_cut_mad: f64,
+    /// Collect per-frame PSNR/SSIM statistics (the quality report). This is
+    /// the dominant cost of an enabled report (~60% of compile time), so
+    /// `asciline-compile --no-quality` turns it off to truly skip it — the
+    /// wire output is unaffected either way.
+    pub collect_stats: bool,
     prev: Option<[Plane; 3]>,
     n: u32,
     /// Per-frame PSNR/SSIM of the lossy reconstruction vs the source.
@@ -228,6 +234,7 @@ impl ProfileEncoder {
             skip_t,
             level,
             scene_cut_mad: 0.0, // disabled by default: bit-exact original behavior
+            collect_stats: true,
             prev: None,
             n: 0,
             stats: QualityStats::new(),
@@ -359,14 +366,19 @@ impl ProfileEncoder {
         // Quality report: luma source vs luma reconstruction (the signal the
         // DCT actually transforms), plus the full displayed BGR vs the source.
         // `self.n` is still THIS frame's index here (incremented below).
-        let src_y = &planes[0];
-        let rec_y = &self.prev.as_ref().unwrap()[0].buf;
-        self.stats.push(
-            self.n as u64,
-            psnr(src_y, rec_y),
-            ssim(src_y, rec_y, w, h),
-            psnr(frame_bgr, &shown),
-        );
+        // Skipped entirely when `collect_stats` is off (`--no-quality`): the
+        // SSIM is the single biggest per-frame cost, so this is what makes
+        // the flag actually skip the work, not just the printed report.
+        if self.collect_stats {
+            let src_y = &planes[0];
+            let rec_y = &self.prev.as_ref().unwrap()[0].buf;
+            self.stats.push(
+                self.n as u64,
+                psnr(src_y, rec_y),
+                ssim(src_y, rec_y, w, h),
+                psnr(frame_bgr, &shown),
+            );
+        }
         self.n += 1;
 
         (msg, shown)
@@ -412,7 +424,189 @@ fn block_sad(
     sad
 }
 
+/// Per-block encode result (phase 1): motion vector, skip flag, quantized
+/// coefficients (for DC DPCM + zigzag RLE) and the reconstructed 8×8 block.
+#[derive(Clone, Copy)]
+struct BlockEnc {
+    skip: bool,
+    mvx: i32,
+    mvy: i32,
+    cq: [[i64; 8]; 8],
+    rec: [[u8; 8]; 8],
+}
+
+/// Compute one block's motion vector, quantized coefficients, skip decision
+/// and reconstruction. A pure function of the block's inputs (current plane,
+/// previous reconstruction, quant table) — every block is independent, so
+/// this runs in parallel; results are bit-identical to the serial loop.
+#[allow(clippy::too_many_arguments)]
+fn enc_block(
+    cur: &[u8],
+    prev: Option<&Plane>,
+    w: usize,
+    h: usize,
+    by: usize,
+    bx: usize,
+    ftype: u8,
+    use_mv: bool,
+    qm: &[i64; 64],
+    dz: f64,
+    skip_t: f64,
+    f: &[[f64; 8]; 8],
+) -> BlockEnc {
+    // current block as f64
+    let mut cur_b = [[0f64; 8]; 8];
+    for y in 0..8 {
+        for x in 0..8 {
+            cur_b[y][x] = cur[(by * 8 + y) * w + bx * 8 + x] as f64;
+        }
+    }
+
+    // motion search (luma inter only): scan dy outer, dx inner, (0,0)
+    // preferred on ties — identical ordering to codec.py
+    let mut mvx: i32 = 0;
+    let mut mvy: i32 = 0;
+    if ftype == 1 && use_mv {
+        let prev_buf = &prev.as_ref().unwrap().buf;
+        let mut best = block_sad(cur, prev_buf, w, h, by, bx, 0, 0);
+        for dy in -R_SEARCH..=R_SEARCH {
+            for dx in -R_SEARCH..=R_SEARCH {
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+                let s = block_sad(cur, prev_buf, w, h, by, bx, dx, dy);
+                if s < best {
+                    best = s;
+                    mvx = dx;
+                    mvy = dy;
+                }
+            }
+        }
+    }
+
+    // predict
+    let mut pred = [[0f64; 8]; 8];
+    if ftype == 0 {
+        for y in 0..8 {
+            for x in 0..8 {
+                pred[y][x] = 128.0;
+            }
+        }
+    } else {
+        let prev_buf = &prev.as_ref().unwrap().buf;
+        let w32 = w as i32;
+        let h32 = h as i32;
+        for y in 0..8 {
+            for x in 0..8 {
+                if use_mv {
+                    let sx = ((bx * 8 + x) as i32 + mvx).clamp(0, w32 - 1) as usize;
+                    let sy = ((by * 8 + y) as i32 + mvy).clamp(0, h32 - 1) as usize;
+                    pred[y][x] = prev_buf[sy * w + sx] as f64;
+                } else {
+                    pred[y][x] = prev_buf[(by * 8 + y) * w + bx * 8 + x] as f64;
+                }
+            }
+        }
+    }
+
+    // residual + SSE
+    let mut resid = [[0f64; 8]; 8];
+    let mut sse = 0f64;
+    for y in 0..8 {
+        for x in 0..8 {
+            let d = cur_b[y][x] - pred[y][x];
+            resid[y][x] = d;
+            sse += d * d;
+        }
+    }
+
+    // forward DCT: tmp = F @ resid; t = tmp @ Fᵀ
+    let mut tmp = [[0f64; 8]; 8];
+    for k in 0..8 {
+        for n in 0..8 {
+            let mut s = 0.0;
+            for m in 0..8 {
+                s += f[k][m] * resid[m][n];
+            }
+            tmp[k][n] = s;
+        }
+    }
+    let mut t = [[0f64; 8]; 8];
+    for k in 0..8 {
+        for v in 0..8 {
+            let mut s = 0.0;
+            for m in 0..8 {
+                s += tmp[k][m] * f[v][m];
+            }
+            t[k][v] = s;
+        }
+    }
+
+    // quantize with dead-zone
+    let mut cq = [[0i64; 8]; 8];
+    let mut all_zero = true;
+    for y in 0..8 {
+        for x in 0..8 {
+            let tv = t[y][x] / qm[y * 8 + x] as f64;
+            let q = if tv.abs() < dz { 0.0 } else { np_round(tv) };
+            let qi = q as i64;
+            cq[y][x] = qi;
+            if qi != 0 {
+                all_zero = false;
+            }
+        }
+    }
+
+    // skip decision (inter only)
+    let is_skip = ftype == 1
+        && mvx == 0
+        && mvy == 0
+        && (all_zero || (skip_t > 0.0 && sse < skip_t));
+
+    // reconstruct
+    let mut rec_b = [[0u8; 8]; 8];
+    if is_skip {
+        let prev_buf = &prev.as_ref().unwrap().buf;
+        for y in 0..8 {
+            for x in 0..8 {
+                rec_b[y][x] = prev_buf[(by * 8 + y) * w + bx * 8 + x];
+            }
+        }
+    } else {
+        let mut c = [[0i64; 8]; 8];
+        for y in 0..8 {
+            for x in 0..8 {
+                c[y][x] = cq[y][x] * qm[y * 8 + x];
+            }
+        }
+        let idct = idct_int(&c);
+        for y in 0..8 {
+            for x in 0..8 {
+                let val = (pred[y][x] as i64 + idct[y][x]).clamp(0, 255);
+                rec_b[y][x] = val as u8;
+            }
+        }
+    }
+
+    BlockEnc {
+        skip: is_skip,
+        mvx,
+        mvy,
+        cq,
+        rec: rec_b,
+    }
+}
+
 /// Encode one plane. `prev` is `None` on keyframes (prediction = 128).
+///
+/// Two phases: (1) every block is computed in parallel with rayon — motion
+/// search, prediction, DCT, quantization, skip decision and reconstruction
+/// touch only that block's own inputs, so results are order-independent;
+/// (2) the serial phase assembles the wire bytes in raster order: the skip
+/// mask, motion vectors, and the zigzag RLE with the DC DPCM predictor chain
+/// (which is inherently serial). Because the parallel phase produces exactly
+/// the same per-block results and phase 2 walks blocks in the same order,
+/// the output is bit-identical to the original single-threaded loop.
 #[allow(clippy::too_many_arguments)]
 fn enc_plane(
     cur: &[u8],
@@ -428,194 +622,67 @@ fn enc_plane(
     let nbx = w / 8;
     let nby = h / 8;
     let nb = nbx * nby;
-
-    let mut recon = vec![0u8; w * h];
-    let mut skip = vec![false; nb];
-    let mut body: Vec<u8> = Vec::new();
-    let mut dc_pred: i64 = 0;
     let f = dct_basis();
 
-    for by in 0..nby {
-        for bx in 0..nbx {
-            let bi = by * nbx + bx;
+    // ── phase 1: parallel per-block compute (rayon preserves raster order) ──
+    let blocks: Vec<BlockEnc> = (0..nb)
+        .into_par_iter()
+        .map(|bi| {
+            let by = bi / nbx;
+            let bx = bi % nbx;
+            enc_block(cur, prev, w, h, by, bx, ftype, use_mv, qm, dz, skip_t, f)
+        })
+        .collect();
 
-            // current block as f64
-            let mut cur_b = [[0f64; 8]; 8];
-            for y in 0..8 {
-                for x in 0..8 {
-                    cur_b[y][x] = cur[(by * 8 + y) * w + bx * 8 + x] as f64;
-                }
-            }
+    // ── phase 2: serial assembly (recon plane, skip mask, DC-DPCM'd body) ──
+    let mut recon = vec![0u8; w * h];
+    let mut body: Vec<u8> = Vec::new();
+    let mut dc_pred: i64 = 0;
 
-            // motion search (luma inter only): scan dy outer, dx inner, (0,0)
-            // preferred on ties — identical ordering to codec.py
-            let mut mvx: i32 = 0;
-            let mut mvy: i32 = 0;
-            if ftype == 1 && use_mv {
-                let prev_buf = &prev.as_ref().unwrap().buf;
-                let mut best = block_sad(cur, prev_buf, w, h, by, bx, 0, 0);
-                for dy in -R_SEARCH..=R_SEARCH {
-                    for dx in -R_SEARCH..=R_SEARCH {
-                        if dx == 0 && dy == 0 {
-                            continue;
-                        }
-                        let s = block_sad(cur, prev_buf, w, h, by, bx, dx, dy);
-                        if s < best {
-                            best = s;
-                            mvx = dx;
-                            mvy = dy;
-                        }
-                    }
-                }
-            }
+    for (bi, blk) in blocks.iter().enumerate() {
+        let by = bi / nbx;
+        let bx = bi % nbx;
 
-            // predict
-            let mut pred = [[0f64; 8]; 8];
-            if ftype == 0 {
-                for y in 0..8 {
-                    for x in 0..8 {
-                        pred[y][x] = 128.0;
-                    }
-                }
-            } else {
-                let prev_buf = &prev.as_ref().unwrap().buf;
-                let w32 = w as i32;
-                let h32 = h as i32;
-                for y in 0..8 {
-                    for x in 0..8 {
-                        if use_mv {
-                            let sx = ((bx * 8 + x) as i32 + mvx).clamp(0, w32 - 1) as usize;
-                            let sy = ((by * 8 + y) as i32 + mvy).clamp(0, h32 - 1) as usize;
-                            pred[y][x] = prev_buf[sy * w + sx] as f64;
-                        } else {
-                            pred[y][x] = prev_buf[(by * 8 + y) * w + bx * 8 + x] as f64;
-                        }
-                    }
-                }
+        // reconstruction (disjoint 8×8 regions, any order)
+        for y in 0..8 {
+            for x in 0..8 {
+                recon[(by * 8 + y) * w + bx * 8 + x] = blk.rec[y][x];
             }
+        }
 
-            // residual + SSE
-            let mut resid = [[0f64; 8]; 8];
-            let mut sse = 0f64;
-            for y in 0..8 {
-                for x in 0..8 {
-                    let d = cur_b[y][x] - pred[y][x];
-                    resid[y][x] = d;
-                    sse += d * d;
-                }
-            }
-
-            // forward DCT: tmp = F @ resid; t = tmp @ Fᵀ
-            let mut tmp = [[0f64; 8]; 8];
-            for k in 0..8 {
-                for n in 0..8 {
-                    let mut s = 0.0;
-                    for m in 0..8 {
-                        s += f[k][m] * resid[m][n];
-                    }
-                    tmp[k][n] = s;
-                }
-            }
-            let mut t = [[0f64; 8]; 8];
-            for k in 0..8 {
-                for v in 0..8 {
-                    let mut s = 0.0;
-                    for m in 0..8 {
-                        s += tmp[k][m] * f[v][m];
-                    }
-                    t[k][v] = s;
-                }
-            }
-
-            // quantize with dead-zone
-            let mut cq = [[0i64; 8]; 8];
-            let mut all_zero = true;
-            for y in 0..8 {
-                for x in 0..8 {
-                    let tv = t[y][x] / qm[y * 8 + x] as f64;
-                    let q = if tv.abs() < dz { 0.0 } else { np_round(tv) };
-                    let qi = q as i64;
-                    cq[y][x] = qi;
-                    if qi != 0 {
-                        all_zero = false;
-                    }
-                }
-            }
-
-            // skip decision (inter only)
-            let is_skip = ftype == 1
-                && mvx == 0
-                && mvy == 0
-                && (all_zero || (skip_t > 0.0 && sse < skip_t));
-            skip[bi] = is_skip;
-
-            // reconstruct
-            let mut rec_b = [[0u8; 8]; 8];
-            if is_skip {
-                let prev_buf = &prev.as_ref().unwrap().buf;
-                for y in 0..8 {
-                    for x in 0..8 {
-                        rec_b[y][x] = prev_buf[(by * 8 + y) * w + bx * 8 + x];
-                    }
-                }
-            } else {
-                let mut c = [[0i64; 8]; 8];
-                for y in 0..8 {
-                    for x in 0..8 {
-                        c[y][x] = cq[y][x] * qm[y * 8 + x];
-                    }
-                }
-                let idct = idct_int(&c);
-                for y in 0..8 {
-                    for x in 0..8 {
-                        let val = (pred[y][x] as i64 + idct[y][x]).clamp(0, 255);
-                        rec_b[y][x] = val as u8;
-                    }
-                }
-            }
-            for y in 0..8 {
-                for x in 0..8 {
-                    recon[(by * 8 + y) * w + bx * 8 + x] = rec_b[y][x];
-                }
-            }
-
-            // emit coded blocks
-            if !is_skip {
-                if ftype == 1 && use_mv {
-                    body.push(mvx as i8 as u8);
-                    body.push(mvy as i8 as u8);
-                }
-                // zigzag + DC DPCM (over coded blocks, raster order)
-                let dc_old = cq[0][0];
-                let dc_diff = dc_old - dc_pred;
-                dc_pred = dc_old;
-                let mut pairs: Vec<(u8, i16)> = Vec::new();
-                let mut pos: i32 = 0;
-                let mut prev_pos: i32 = -1;
-                for k in 0..64usize {
-                    let id = ZZ[k];
-                    let v = if k == 0 {
-                        dc_diff
-                    } else {
-                        cq[id / 8][id % 8]
-                    };
-                    if v != 0 {
+        if blk.skip {
+            continue;
+        }
+        // emit coded blocks
+        if ftype == 1 && use_mv {
+            body.push(blk.mvx as i8 as u8);
+            body.push(blk.mvy as i8 as u8);
+        }
+        // zigzag + DC DPCM (over coded blocks, raster order)
+        let dc_old = blk.cq[0][0];
+        let dc_diff = dc_old - dc_pred;
+        dc_pred = dc_old;
+        let mut pairs: Vec<(u8, i16)> = Vec::new();
+        let mut pos: i32 = 0;
+        let mut prev_pos: i32 = -1;
+        for k in 0..64usize {
+            let id = ZZ[k];
+            let v = if k == 0 { dc_diff } else { blk.cq[id / 8][id % 8] };
+            if v != 0 {
                 assert!(
                     (-32767..=32767).contains(&v),
                     "profile: coefficient out of int16 range"
                 );
-                        let run = (pos - prev_pos - 1) as u8;
-                        pairs.push((run, v as i16));
-                        prev_pos = pos;
-                    }
-                    pos += 1;
-                }
-                body.push(pairs.len() as u8);
-                for (run, val) in pairs {
-                    body.push(run);
-                    body.extend_from_slice(&val.to_le_bytes());
-                }
+                let run = (pos - prev_pos - 1) as u8;
+                pairs.push((run, v as i16));
+                prev_pos = pos;
             }
+            pos += 1;
+        }
+        body.push(pairs.len() as u8);
+        for (run, val) in pairs {
+            body.push(run);
+            body.extend_from_slice(&val.to_le_bytes());
         }
     }
 
@@ -623,8 +690,8 @@ fn enc_plane(
     let mut head: Vec<u8> = Vec::new();
     if ftype == 1 {
         let mut mask = vec![0u8; nb.div_ceil(8)];
-        for bi in 0..nb {
-            if skip[bi] {
+        for (bi, blk) in blocks.iter().enumerate() {
+            if blk.skip {
                 mask[bi >> 3] |= 0x80 >> (bi & 7);
             }
         }
@@ -1037,6 +1104,32 @@ mod tests {
         enc.encode(&a);
         let (m2, _) = enc.encode(&b);
         assert_eq!(payload_ftype(&m2), 1, "without detection the cut frame stays inter");
+    }
+
+    #[test]
+    fn parallel_output_is_bit_identical_across_thread_counts() {
+        let (w, h) = (64usize, 48usize); // 8×6 = 48 blocks, real threading
+        let run = |threads: usize, frames: Vec<Vec<u8>>| -> Vec<(Vec<u8>, Vec<u8>)> {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let mut enc = ProfileEncoder::new(w, h, 70);
+                enc.scene_cut_mad = 20.0;
+                frames.iter().map(|f| enc.encode(f)).collect()
+            })
+        };
+        // inter-heavy noise sequence + a forced keyframe via a hard scene change
+        let mut frames: Vec<Vec<u8>> = (0..10u32).map(|i| synth_bgr(w, h, i, 42)).collect();
+        frames.push(ramp_bgr(w, h, 9)); // clearly a different scene → forced keyframe
+        let single = run(1, frames.clone());
+        let multi = run(8, frames);
+        assert_eq!(single.len(), multi.len());
+        for (i, (a, b)) in single.iter().zip(&multi).enumerate() {
+            assert_eq!(a.0, b.0, "frame {i}: wire bytes differ across thread counts");
+            assert_eq!(a.1, b.1, "frame {i}: shown frame differs across thread counts");
+        }
     }
 
     #[test]

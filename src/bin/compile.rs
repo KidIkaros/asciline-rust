@@ -190,12 +190,21 @@ fn main() -> Result<()> {
     // Adaptive pixel quality report: only when the lossless path is actually
     // lossy (colour quantization or temporal drift tolerance). Measured against
     // the ORIGINAL video frame, so both loss sources show up.
-    let adaptive_quality = !profile && pixel && (args.tolerance > 0 || args.quantize > 0);
+    // Adaptive pixel quality report: only when the lossless path is actually
+    // lossy AND the report wasn't suppressed — `--no-quality` must skip the
+    // computation too (it is the dominant per-frame cost when enabled).
+    let adaptive_quality = !profile
+        && pixel
+        && !args.no_quality
+        && (args.tolerance > 0 || args.quantize > 0);
     let mut adaptive_stats = QualityStats::new();
     let mut profile_enc = if profile {
         let mut pe = ProfileEncoder::new(cols as usize, rows as usize, args.qf.clamp(1, 100));
         if args.hard {
             pe.level = 9; // --hard applies to the profile's zlib stage too
+        }
+        if args.no_quality {
+            pe.collect_stats = false; // skip the SSIM work, not just the print
         }
         if !args.no_scene_cut {
             // scene-cut keyframes: when luma stops resembling the previous

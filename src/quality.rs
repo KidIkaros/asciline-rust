@@ -13,6 +13,8 @@
 //!
 //! All arithmetic is f64, so results are deterministic across runs.
 
+use rayon::prelude::*;
+
 /// Mean squared error between two equal-length byte planes.
 pub fn mse(a: &[u8], b: &[u8]) -> f64 {
     assert_eq!(a.len(), b.len(), "mse: plane length mismatch");
@@ -68,15 +70,77 @@ fn reflect(i: i64, n: usize) -> usize {
 }
 
 /// Separable Gaussian blur (horizontal then vertical) with reflect boundaries.
+///
+/// Parallelized over rows with rayon: each output pixel is an independent
+/// dot product of fixed inputs, so results are bit-identical to the serial
+/// loop regardless of thread count (the SSIM report is deterministic). This
+/// is the dominant cost of the per-frame quality report (~60% of compile
+/// time when enabled), so it scales with cores.
 fn blur(src: &[f64], w: usize, h: usize, k: &[f64; 11]) -> Vec<f64> {
+    // Rayon's parallel iterator adds per-chunk scheduling overhead; on a
+    // single-threaded pool (RAYON_NUM_THREADS=1) or tiny planes that exceeds
+    // the win, so fall back to the plain loop — same results, no slowdown.
+    if rayon::current_num_threads() <= 1 || w * h < 4096 {
+        return blur_serial(src, w, h, k);
+    }
+    // Mirror-index LUTs: the kernel taps are `reflect(x-5+ki, w)` for a fixed
+    // 11-tap window, so the per-pixel `rem_euclid` (i64 division, ~30 cycles)
+    // in the hot loop can be replaced by two small precomputed tables. Same
+    // samples, same results — just ~5-10x less arithmetic per pixel.
+    let kx: Vec<[usize; 11]> = (0..w)
+        .map(|x| std::array::from_fn(|ki| reflect(x as i64 - 5 + ki as i64, w)))
+        .collect();
+    let ky: Vec<[usize; 11]> = (0..h)
+        .map(|y| std::array::from_fn(|ki| reflect(y as i64 - 5 + ki as i64, h)))
+        .collect();
+
+    let mut tmp = vec![0.0f64; w * h];
+    // horizontal pass: each output row depends only on its own input row
+    tmp.par_chunks_mut(w)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let base = y * w;
+            for (x, cell) in row.iter_mut().enumerate() {
+                let mut acc = 0.0;
+                for (ki, &kw) in k.iter().enumerate() {
+                    acc += kw * src[base + kx[x][ki]];
+                }
+                *cell = acc;
+            }
+        });
+    let mut out = vec![0.0f64; w * h];
+    // vertical pass: each output row reads only `tmp` (read-only here)
+    out.par_chunks_mut(w)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let ky_row = &ky[y];
+            for (x, cell) in row.iter_mut().enumerate() {
+                let mut acc = 0.0;
+                for (ki, &kw) in k.iter().enumerate() {
+                    acc += kw * tmp[ky_row[ki] * w + x];
+                }
+                *cell = acc;
+            }
+        });
+    out
+}
+
+/// Plain serial blur (the original loop — identical results, no rayon
+/// overhead). Used on single-threaded pools and tiny planes.
+fn blur_serial(src: &[f64], w: usize, h: usize, k: &[f64; 11]) -> Vec<f64> {
+    let kx: Vec<[usize; 11]> = (0..w)
+        .map(|x| std::array::from_fn(|ki| reflect(x as i64 - 5 + ki as i64, w)))
+        .collect();
+    let ky: Vec<[usize; 11]> = (0..h)
+        .map(|y| std::array::from_fn(|ki| reflect(y as i64 - 5 + ki as i64, h)))
+        .collect();
     let mut tmp = vec![0.0f64; w * h];
     for y in 0..h {
         let row = y * w;
         for x in 0..w {
             let mut acc = 0.0;
             for (ki, &kw) in k.iter().enumerate() {
-                let sx = reflect(x as i64 - 5 + ki as i64, w);
-                acc += kw * src[row + sx];
+                acc += kw * src[row + kx[x][ki]];
             }
             tmp[row + x] = acc;
         }
@@ -86,8 +150,7 @@ fn blur(src: &[f64], w: usize, h: usize, k: &[f64; 11]) -> Vec<f64> {
         for x in 0..w {
             let mut acc = 0.0;
             for (ki, &kw) in k.iter().enumerate() {
-                let sy = reflect(y as i64 - 5 + ki as i64, h);
-                acc += kw * tmp[sy * w + x];
+                acc += kw * tmp[ky[y][ki] * w + x];
             }
             out[y * w + x] = acc;
         }

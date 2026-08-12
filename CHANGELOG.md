@@ -33,7 +33,9 @@ with the original, so the unchanged browser client in `web/` works as-is. See
   - `--profile`: luma + full-colour deviation of the DCT reconstruction.
   - adaptive `--pixel` with `--tolerance`/`--quantize`: deviation of the shown
     framebuffer vs the source video frame.
-  - `--no-quality` disables them; lossless frames render as `∞`.
+  - `--no-quality` disables them (and now skips the SSIM *computation*
+    entirely, not just the printed lines — the blur was ~60% of compile
+    instructions when enabled); lossless frames render as `∞`.
 - Scene-cut keyframes for `--profile` (on by default in the compiler): when a
   frame's luma stops resembling the previous reconstruction (mean absolute
   difference > `SCENE_CUT_MAD`, a hard-cut threshold), the encoder re-encodes
@@ -47,6 +49,16 @@ with the original, so the unchanged browser client in `web/` works as-is. See
   `codec.py` encoder and the shipped browser `codec.js` decoder — for the
   adaptive codec and the tag-4 profile, plus an end-to-end server test and
   map+encode benchmarks.
+- Parallel profile encoder (rayon): block-independent motion search, DCT,
+  quantization and reconstruction run in a parallel phase; the serial phase
+  (skip mask, motion vectors, DC-DPCM'd zigzag stream) assembles the exact
+  same bytes as before — verified bit-identical across thread counts (1 vs 8
+  in a test, 1 vs 12 empirically) and against the original vectors. ~31 s →
+  ~16 s on a 450-frame 720p clip at 480 cols.
+- Rayon-parallel SSIM blur (the report's dominant cost): each output pixel is
+  an independent dot product, so the blur parallelizes over rows with
+  bit-identical results; mirror-index LUTs replace the per-pixel `rem_euclid`
+  in the hot loop (~4x faster single-threaded too).
 
 ### Performance
 

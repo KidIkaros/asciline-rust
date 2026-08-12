@@ -136,8 +136,11 @@ Lossless frames (e.g. a fully static segment) show as `∞`. The `worst frame`
 line names the weakest frame (lowest PSNR-Y, with its own SSIM/RGB) — in
 practice this is a scene cut or a motion burst that lands between keyframes
 (cuts exactly on a keyframe boundary re-encode cleanly and won't show up). The
-report costs ~1-4% of compile time; `--no-quality` skips it for scripted batch
-compiles.
+report is computed with a rayon-parallel Gaussian blur that scales with cores
+(it is the single biggest per-frame cost when enabled — measured ~60% of
+compile instructions — so parallelizing it matters); `--no-quality` now
+skips the SSIM computation entirely, not just the printed lines, which makes
+scripted batch compiles ~2x faster still.
 
 **Scene-cut keyframes (on by default):** `--profile` compares each frame's
 luma against the previous reconstruction and, when the mean absolute
@@ -152,6 +155,17 @@ the 4s clip drops from 172 KB to 164 KB, including the extra keyframe).
 `--no-scene-cut` restores the original fixed-cadence behavior; the detector
 is off by default inside the library so the encoder stays bit-exact with
 `codec.py` unless the compiler enables it.
+
+The encoder itself is **parallelized with rayon**: every 8×8 block (motion
+search, prediction, DCT, quantization, skip decision, reconstruction) is
+computed independently in a parallel phase, then a serial phase assembles the
+skip mask, motion vectors and the DC-DPCM'd zigzag stream in raster order
+(the DPCM predictor chain is inherently serial). Output is bit-identical
+regardless of thread count — verified by a determinism test (1 vs 8 threads)
+and by the cross-implementation vectors. Measured on a 15 s 720p clip at 480
+cols (450 frames, 12 cores): **~31 s → ~16 s** with the quality report, and
+**~7 s** with `--no-quality` (which now skips the SSIM computation, not just
+its printed lines).
 Note: combining `--profile` with `--quantize` measures against the
 pre-quantized source, so the color numbers then look better than they would
 against the original video.
@@ -209,7 +223,7 @@ in the bit-exact decode direction, which is what the tests verify.
 ## Validation
 
 ```bash
-cargo test                    # 38 unit tests: codec + profile round-trips (incl. DELTA wire format + tolerance semantics + scene-cut keyframes), mapper, filters, protocol, quality
+cargo test                    # 39 unit tests: codec + profile round-trips (incl. DELTA wire format + tolerance semantics + scene-cut keyframes + thread-count determinism), mapper, filters, protocol, quality
 
 # Cross-implementation, bit-exact codec checks (adaptive):
 python3 experiments/gen_python_vectors.py > experiments/vectors_python.bin

@@ -465,6 +465,31 @@ mod tests {
     }
 
     #[test]
+    fn parallel_blur_matches_serial() {
+        // ≥4096 px so blur takes the rayon path; exercise it under an 8-thread
+        // pool vs a 1-thread pool (serial fallback) — the report numbers must
+        // be identical regardless of thread count.
+        let (w, h) = (96usize, 48usize); // 4608 px
+        let a = gradient(w, h);
+        let mut noise = lcg_noise(11);
+        let b: Vec<u8> = a.iter().map(|&v| v.wrapping_add(noise() % 17)).collect();
+        let single = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let multi = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .unwrap();
+        let s1 = single.install(|| ssim(&a, &b, w, h));
+        let s8 = multi.install(|| ssim(&a, &b, w, h));
+        assert!(
+            (s1 - s8).abs() < 1e-12,
+            "parallel blur must be bit-identical to serial: {s1} vs {s8}"
+        );
+    }
+
+    #[test]
     fn ssim_orders_by_quality() {
         let a = gradient(32, 32);
         let mut n1 = lcg_noise(1);

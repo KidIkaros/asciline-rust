@@ -56,7 +56,9 @@ fn bench_profile_parallel() {
 #[ignore]
 fn bench_ssim_parallel() {
     let (w, h) = (480usize, 272usize);
-    let a: Vec<u8> = (0..w * h).map(|i| ((i as u32 * 2654435761) >> 24) as u8).collect();
+    let a: Vec<u8> = (0..w * h)
+        .map(|i| ((i as u32 * 2654435761) >> 24) as u8)
+        .collect();
     let b: Vec<u8> = a.iter().map(|&v| v.wrapping_add(3)).collect();
     for threads in [1usize, 12] {
         let pool = rayon::ThreadPoolBuilder::new()

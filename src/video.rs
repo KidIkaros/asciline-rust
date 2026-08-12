@@ -63,8 +63,8 @@ pub fn probe_video(src: &str, is_webcam: bool) -> Result<VideoInfo> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout)
-        .context("ffprobe returned invalid JSON")?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).context("ffprobe returned invalid JSON")?;
     let stream = json["streams"]
         .as_array()
         .and_then(|a| a.first())
@@ -82,7 +82,10 @@ pub fn probe_video(src: &str, is_webcam: bool) -> Result<VideoInfo> {
         .and_then(|s| s.parse::<f64>().ok())
         .or_else(|| stream["duration"].as_f64())
         .unwrap_or(0.0);
-    let frame_count = stream["nb_frames"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let frame_count = stream["nb_frames"]
+        .as_str()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
 
     Ok(VideoInfo {
         width,
@@ -199,7 +202,6 @@ impl FrameReader {
         }
         Some(buf)
     }
-
 }
 
 impl Drop for FrameReader {

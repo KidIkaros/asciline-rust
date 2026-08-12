@@ -14,7 +14,9 @@ use asciline::profile::{ProfileDecoder, ProfileEncoder};
 
 /// Deterministic synthetic BGR frame: LCG noise + a moving bright blob.
 fn synth_bgr(w: usize, h: usize, i: u32, seed: u64) -> Vec<u8> {
-    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(i as u64);
+    let mut state = seed
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(i as u64);
     let mut next = move || {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -48,7 +50,11 @@ fn roundtrip_profile() {
     let mut cases = 0usize;
     let mut frames = 0usize;
 
-    for (w, h, n, qf) in [(48usize, 32usize, 60u32, 70u8), (64, 48, 30, 50), (32, 16, 12, 90)] {
+    for (w, h, n, qf) in [
+        (48usize, 32usize, 60u32, 70u8),
+        (64, 48, 30, 50),
+        (32, 16, 12, 90),
+    ] {
         let mut enc = ProfileEncoder::new(w, h, qf);
         let mut dec = ProfileDecoder::new();
 
@@ -61,7 +67,9 @@ fn roundtrip_profile() {
         for i in 0..n {
             let f = synth_bgr(w, h, i, 777);
             let (msg, shown) = enc.encode(&f);
-            let (idx, out_frame) = dec.decode(&msg).unwrap_or_else(|e| panic!("{w}x{h} frame {i}: {e}"));
+            let (idx, out_frame) = dec
+                .decode(&msg)
+                .unwrap_or_else(|e| panic!("{w}x{h} frame {i}: {e}"));
             assert_eq!(idx, i);
             assert_eq!(
                 out_frame, shown,
@@ -82,5 +90,7 @@ fn roundtrip_profile() {
 
     let mut f = std::fs::File::create("experiments/vectors_profile_rust.bin").expect("create file");
     f.write_all(&out).expect("write vectors");
-    eprintln!("OK: {frames} profile frames round-tripped across {cases} cases; rust vectors written");
+    eprintln!(
+        "OK: {frames} profile frames round-tripped across {cases} cases; rust vectors written"
+    );
 }

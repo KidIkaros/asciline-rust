@@ -168,8 +168,6 @@ impl BlurLuts {
     }
 }
 
-
-
 /// Structural similarity between two `w`×`h` byte planes (1.0 = identical).
 ///
 /// Standard windowed SSIM: per-pixel 11×11 Gaussian means, variances and
@@ -193,7 +191,13 @@ pub fn ssim(a: &[u8], b: &[u8], w: usize, h: usize) -> f64 {
     // so fall back to the plain loop — same results, no slowdown.
     let luts = BlurLuts::new(w, h);
     let parallel = rayon::current_num_threads() > 1;
-    let b = |src: &[f64]| if parallel { luts.blur(src, &k) } else { luts.blur_serial(src, &k) };
+    let b = |src: &[f64]| {
+        if parallel {
+            luts.blur(src, &k)
+        } else {
+            luts.blur_serial(src, &k)
+        }
+    };
     let mu_a = b(&af);
     let mu_b = b(&bf);
     let e_a2 = b(&a2);
@@ -248,7 +252,11 @@ fn luma_from_bgr(bgr: &[u8]) -> Vec<u8> {
 /// triple the `--profile` report uses. Channel order is aligned internally, so
 /// both the luma and full-colour metrics measure the true deviation.
 pub fn rgb_vs_bgr(src_rgb: &[u8], recon_bgr: &[u8], w: usize, h: usize) -> (f64, f64, f64) {
-    assert_eq!(src_rgb.len(), w * h * 3, "rgb_vs_bgr: source geometry mismatch");
+    assert_eq!(
+        src_rgb.len(),
+        w * h * 3,
+        "rgb_vs_bgr: source geometry mismatch"
+    );
     assert_eq!(
         recon_bgr.len(),
         w * h * 3,
@@ -462,7 +470,10 @@ mod tests {
         let mut b = a.clone();
         b[17] = b[17].wrapping_add(1); // one pixel off by 1
         let p = psnr(&a, &b);
-        assert!(p > 40.0 && p.is_finite(), "single-LSB error must still be finite PSNR, got {p}");
+        assert!(
+            p > 40.0 && p.is_finite(),
+            "single-LSB error must still be finite PSNR, got {p}"
+        );
     }
 
     #[test]
@@ -479,7 +490,10 @@ mod tests {
         let sab = ssim(&a, &b, 32, 32);
         let sba = ssim(&b, &a, 32, 32);
         assert!((sab - sba).abs() < 1e-12, "ssim must be symmetric");
-        assert!(sab > 0.0 && sab < 1.0, "different planes must score in (0,1), got {sab}");
+        assert!(
+            sab > 0.0 && sab < 1.0,
+            "different planes must score in (0,1), got {sab}"
+        );
     }
 
     #[test]
@@ -516,8 +530,14 @@ mod tests {
         let big: Vec<u8> = a.iter().map(|&v| v.wrapping_add(n2() % 129)).collect();
         let high = ssim(&a, &small, 32, 32);
         let low = ssim(&a, &big, 32, 32);
-        assert!(high > low, "more distortion must lower SSIM: {high} vs {low}");
-        assert!(high > 0.9, "tiny noise on a gradient must stay near 1.0, got {high}");
+        assert!(
+            high > low,
+            "more distortion must lower SSIM: {high} vs {low}"
+        );
+        assert!(
+            high > 0.9,
+            "tiny noise on a gradient must stay near 1.0, got {high}"
+        );
     }
 
     #[test]
@@ -540,18 +560,24 @@ mod tests {
     fn rgb_vs_bgr_lossless_is_perfect() {
         // grayscale gradient → RGB24, then the lossless RGB→BGR swap
         let gray = gradient(32, 24);
-        let rgb: Vec<u8> = gray
-            .iter()
-            .flat_map(|&v| [v, v, v])
-            .collect();
+        let rgb: Vec<u8> = gray.iter().flat_map(|&v| [v, v, v]).collect();
         let bgr: Vec<u8> = rgb
             .chunks_exact(3)
             .flat_map(|p| [p[2], p[1], p[0]])
             .collect();
         let (py, sy, pr) = rgb_vs_bgr(&rgb, &bgr, 32, 24);
-        assert!(py.is_infinite(), "lossless conversion must be PSNR ∞, got {py}");
-        assert!((sy - 1.0).abs() < 1e-9, "lossless conversion must be SSIM 1.0, got {sy}");
-        assert!(pr.is_infinite(), "lossless conversion must be PSNR-RGB ∞, got {pr}");
+        assert!(
+            py.is_infinite(),
+            "lossless conversion must be PSNR ∞, got {py}"
+        );
+        assert!(
+            (sy - 1.0).abs() < 1e-9,
+            "lossless conversion must be SSIM 1.0, got {sy}"
+        );
+        assert!(
+            pr.is_infinite(),
+            "lossless conversion must be PSNR-RGB ∞, got {pr}"
+        );
     }
 
     #[test]
@@ -573,8 +599,14 @@ mod tests {
         let mut bad = bgr.clone();
         bad[5] = bad[5].wrapping_add(7);
         let (py2, sy2, pr2) = rgb_vs_bgr(&rgb, &bad, 16, 12);
-        assert!(py2.is_finite() && py2 > 20.0, "luma must register the error, got {py2}");
-        assert!(pr2.is_finite() && pr2 > 20.0, "RGB must register the error, got {pr2}");
+        assert!(
+            py2.is_finite() && py2 > 20.0,
+            "luma must register the error, got {py2}"
+        );
+        assert!(
+            pr2.is_finite() && pr2 > 20.0,
+            "RGB must register the error, got {pr2}"
+        );
         assert!(sy2 > 0.0 && sy2 < 1.0, "SSIM must dip below 1.0, got {sy2}");
     }
 

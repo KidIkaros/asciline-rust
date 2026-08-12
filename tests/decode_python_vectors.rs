@@ -68,15 +68,17 @@ fn decode_python_vectors() {
                 .unwrap_or_else(|e| panic!("case {cols}x{rows} cell={cell} frame {index}: {e}"));
             assert_eq!(idx, index, "frame index mismatch");
             assert_eq!(
-                frame,
-                plain,
+                frame, plain,
                 "decoded frame != python plaintext (case {cols}x{rows} cell={cell} frame {index})"
             );
 
             // 2) our encoder on the same data must also round-trip
             let m = enc.encode(plain, index);
             let (_, f2) = dec.decode(&m).expect("rust self round-trip");
-            assert_eq!(f2, plain, "rust encoder round-trip mismatch (frame {index})");
+            assert_eq!(
+                f2, plain,
+                "rust encoder round-trip mismatch (frame {index})"
+            );
 
             // stash our messages for the Node codec.js check
             rust_out.extend_from_slice(&index.to_be_bytes());
@@ -90,7 +92,8 @@ fn decode_python_vectors() {
         cases += 1;
     }
 
-    let mut f = std::fs::File::create("experiments/vectors_rust.bin").expect("create vectors_rust.bin");
+    let mut f =
+        std::fs::File::create("experiments/vectors_rust.bin").expect("create vectors_rust.bin");
     f.write_all(&rust_out).expect("write vectors_rust.bin");
     eprintln!(
         "OK: decoded {frames} Python-encoded frames across {cases} cases (bit-exact); rust vectors written"

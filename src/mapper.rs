@@ -131,7 +131,14 @@ impl Mapper {
 
     /// Like [`Mapper::map_ascii`] but uses a caller-provided (filtered) gray plane
     /// so runtime filters (sharpen / LUT) can affect the character plane.
-    pub fn map_ascii_with_gray(&self, rgb: &[u8], gray: &[u8], cols: usize, rows: usize, out: &mut [u8]) {
+    pub fn map_ascii_with_gray(
+        &self,
+        rgb: &[u8],
+        gray: &[u8],
+        cols: usize,
+        rows: usize,
+        out: &mut [u8],
+    ) {
         debug_assert_eq!(rgb.len(), cols * rows * 3);
         debug_assert_eq!(gray.len(), cols * rows);
         debug_assert_eq!(out.len(), cols * rows * 4);
@@ -176,7 +183,13 @@ impl Mapper {
     }
 
     /// Like [`Mapper::text_frame`] but uses a caller-provided (filtered) gray plane.
-    pub fn text_frame_with_gray(&self, gray: &[u8], cols: usize, rows: usize, frame_index: u32) -> String {
+    pub fn text_frame_with_gray(
+        &self,
+        gray: &[u8],
+        cols: usize,
+        rows: usize,
+        frame_index: u32,
+    ) -> String {
         let mut s = String::with_capacity(cols * rows + 16);
         s.push_str(&frame_index.to_string());
         s.push('\n');

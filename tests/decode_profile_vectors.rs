@@ -62,5 +62,7 @@ fn decode_profile_vectors() {
         }
         cases += 1;
     }
-    eprintln!("OK: decoded {frames} Python profile-encoded frames across {cases} cases (bit-exact)");
+    eprintln!(
+        "OK: decoded {frames} Python profile-encoded frames across {cases} cases (bit-exact)"
+    );
 }

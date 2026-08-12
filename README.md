@@ -223,7 +223,7 @@ in the bit-exact decode direction, which is what the tests verify.
 ## Validation
 
 ```bash
-cargo test                    # 39 unit tests: codec + profile round-trips (incl. DELTA wire format + tolerance semantics + scene-cut keyframes + thread-count determinism), mapper, filters, protocol, quality
+cargo test                    # 40 unit tests: codec + profile round-trips (incl. DELTA wire format + tolerance semantics + scene-cut keyframes + thread-count determinism), mapper, filters, protocol, quality
 
 # Cross-implementation, bit-exact codec checks (adaptive):
 python3 experiments/gen_python_vectors.py > experiments/vectors_python.bin

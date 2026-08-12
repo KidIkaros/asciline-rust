@@ -138,6 +138,20 @@ practice this is a scene cut or a motion burst that lands between keyframes
 (cuts exactly on a keyframe boundary re-encode cleanly and won't show up). The
 report costs ~1-4% of compile time; `--no-quality` skips it for scripted batch
 compiles.
+
+**Scene-cut keyframes (on by default):** `--profile` compares each frame's
+luma against the previous reconstruction and, when the mean absolute
+difference exceeds a hard cut threshold (`SCENE_CUT_MAD`, a threshold that
+normal in-clip motion never reaches), re-encodes the frame as a fresh
+keyframe instead of a stale motion-predicted inter frame. Keyframes are
+self-describing, so every ASCILINE decoder handles them at any point in the
+stream. This both **fixes the worst-frame quality collapse at cuts** and
+usually **shrinks the file** — the frames after the cut no longer chase a
+stale prediction (measured: worst frame at a cut goes 35.4 → 36.7 dB while
+the 4s clip drops from 172 KB to 164 KB, including the extra keyframe).
+`--no-scene-cut` restores the original fixed-cadence behavior; the detector
+is off by default inside the library so the encoder stays bit-exact with
+`codec.py` unless the compiler enables it.
 Note: combining `--profile` with `--quantize` measures against the
 pre-quantized source, so the color numbers then look better than they would
 against the original video.
@@ -195,7 +209,7 @@ in the bit-exact decode direction, which is what the tests verify.
 ## Validation
 
 ```bash
-cargo test                    # 36 unit tests: codec + profile round-trips (incl. DELTA wire format + tolerance semantics), mapper, filters, protocol, quality
+cargo test                    # 38 unit tests: codec + profile round-trips (incl. DELTA wire format + tolerance semantics + scene-cut keyframes), mapper, filters, protocol, quality
 
 # Cross-implementation, bit-exact codec checks (adaptive):
 python3 experiments/gen_python_vectors.py > experiments/vectors_python.bin

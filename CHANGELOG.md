@@ -34,6 +34,15 @@ with the original, so the unchanged browser client in `web/` works as-is. See
   - adaptive `--pixel` with `--tolerance`/`--quantize`: deviation of the shown
     framebuffer vs the source video frame.
   - `--no-quality` disables them; lossless frames render as `∞`.
+- Scene-cut keyframes for `--profile` (on by default in the compiler): when a
+  frame's luma stops resembling the previous reconstruction (mean absolute
+  difference > `SCENE_CUT_MAD`, a hard-cut threshold), the encoder re-encodes
+  it as a fresh keyframe instead of a stale motion-predicted inter frame.
+  Fixes the worst-frame quality collapse at cuts and usually shrinks the file
+  (measured: 172 KB → 164 KB on a 4 s clip with a mid-stream cut, worst
+  frame 35.4 → 36.7 dB). `--no-scene-cut` restores the original fixed cadence;
+  the detector defaults off in the library so the encoder stays bit-exact
+  with `codec.py` unless enabled.
 - Bit-exact differential harnesses against both originals — the Python
   `codec.py` encoder and the shipped browser `codec.js` decoder — for the
   adaptive codec and the tag-4 profile, plus an end-to-end server test and

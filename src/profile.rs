@@ -44,6 +44,12 @@ const DEFAULT_DZ: f64 = 0.75;
 /// Default skip threshold: inter blocks with SSE below this and zero motion
 /// are skipped even if they have non-zero coefficients.
 const DEFAULT_SKIP_T: f64 = 256.0;
+/// Scene-cut keyframe threshold: when the mean absolute luma deviation between
+/// the source frame and the previous reconstruction exceeds this (0-255 scale),
+/// motion prediction is useless and the frame is encoded as a fresh keyframe.
+/// The compiler enables this; `ProfileEncoder::new` keeps the original
+/// fixed-schedule behavior (0.0 disables detection) for bit-exact parity.
+pub const SCENE_CUT_MAD: f64 = 40.0;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Deterministic constants (bit-exact with codec.py / codec.js)
@@ -193,6 +199,10 @@ pub struct ProfileEncoder {
     pub dz: f64,
     pub skip_t: f64,
     pub level: u32,
+    /// Scene-cut detection: mean absolute luma deviation vs the previous
+    /// reconstruction above which an inter frame is re-encoded as a keyframe.
+    /// 0.0 = disabled (the original fixed every-48-frames schedule).
+    pub scene_cut_mad: f64,
     prev: Option<[Plane; 3]>,
     n: u32,
     /// Per-frame PSNR/SSIM of the lossy reconstruction vs the source.
@@ -217,6 +227,7 @@ impl ProfileEncoder {
             dz,
             skip_t,
             level,
+            scene_cut_mad: 0.0, // disabled by default: bit-exact original behavior
             prev: None,
             n: 0,
             stats: QualityStats::new(),
@@ -279,11 +290,20 @@ impl ProfileEncoder {
         }
 
         // ── keyframe vs inter ──
-        let ftype: u8 = if self.prev.is_none() || self.n.is_multiple_of(KEY) {
+        let mut ftype: u8 = if self.prev.is_none() || self.n.is_multiple_of(KEY) {
             0
         } else {
             1
         };
+        // Scene-cut detection: if the luma barely resembles the previous
+        // reconstruction, motion prediction is worthless — re-encode the frame
+        // as a fresh keyframe (self-describing, so every decoder handles it).
+        if ftype == 1 && self.scene_cut_mad > 0.0 {
+            let prev_y = &self.prev.as_ref().unwrap()[0].buf;
+            if mad(&y, prev_y) > self.scene_cut_mad {
+                ftype = 0;
+            }
+        }
 
         let mut payload: Vec<u8> = Vec::new();
         payload.push(ftype);
@@ -351,6 +371,15 @@ impl ProfileEncoder {
 
         (msg, shown)
     }
+}
+
+/// Mean absolute deviation of one byte plane vs another (scene-cut signal).
+fn mad(a: &[u8], b: &[u8]) -> f64 {
+    let mut sum: u64 = 0;
+    for (&x, &y) in a.iter().zip(b) {
+        sum += (x as i64 - y as i64).unsigned_abs();
+    }
+    sum as f64 / a.len() as f64
 }
 
 /// Sum of absolute differences for one 8×8 block against an edge-clamped
@@ -948,6 +977,66 @@ mod tests {
             let (_, out) = dec.decode(&msg).unwrap();
             assert_eq!(out, shown, "frame {i} mismatch (covers keyframe resync)");
         }
+    }
+
+    /// Smooth diagonal ramp — encodes cleanly so the recon error is tiny
+    /// (the scene-cut signal then cleanly separates "same scene" from "cut").
+    fn ramp_bgr(w: usize, h: usize, phase: u32) -> Vec<u8> {
+        let mut f = vec![0u8; w * h * 3];
+        for (i, px) in f.chunks_exact_mut(3).enumerate() {
+            let v = ((i as u32 * 3 + phase * 40) & 0xff) as u8;
+            px[0] = v;
+            px[1] = v.wrapping_add(40);
+            px[2] = v.wrapping_add(80);
+        }
+        f
+    }
+
+    /// Frame type from a wire message: `[u32 index][tag 4][zlib(payload)]`,
+    /// `payload[0]` is the ftype byte.
+    fn payload_ftype(msg: &[u8]) -> u8 {
+        let payload = zlib_decompress(&msg[5..]).expect("zlib payload");
+        payload[0]
+    }
+
+    #[test]
+    fn scene_cut_forces_keyframe() {
+        let (w, h) = (48usize, 32usize);
+        let mut enc = ProfileEncoder::new(w, h, 70);
+        enc.scene_cut_mad = 20.0;
+        let mut dec = ProfileDecoder::new();
+        let a = ramp_bgr(w, h, 0);
+        let b = ramp_bgr(w, h, 3); // clearly a different scene
+
+        let (m0, s0) = enc.encode(&a);
+        assert_eq!(dec.decode(&m0).unwrap().1, s0);
+        assert_eq!(payload_ftype(&m0), 0, "first frame must be a keyframe");
+
+        // identical next frame: tiny deviation from the recon → inter
+        let (m1, s1) = enc.encode(&a);
+        assert_eq!(dec.decode(&m1).unwrap().1, s1);
+        assert_eq!(payload_ftype(&m1), 1, "static frame must stay inter");
+
+        // scene change: luma deviates massively → forced keyframe
+        let (m2, s2) = enc.encode(&b);
+        assert_eq!(dec.decode(&m2).unwrap().1, s2, "decoder must reproduce the forced keyframe");
+        assert_eq!(payload_ftype(&m2), 0, "scene change must force a keyframe");
+    }
+
+    #[test]
+    fn scene_cut_disabled_by_default() {
+        let (w, h) = (48usize, 32usize);
+        let mut enc = ProfileEncoder::new(w, h, 70);
+        assert_eq!(
+            enc.scene_cut_mad, 0.0,
+            "detection must default off so the codec stays bit-exact with the original"
+        );
+        let a = ramp_bgr(w, h, 0);
+        let b = ramp_bgr(w, h, 3);
+        enc.encode(&a);
+        enc.encode(&a);
+        let (m2, _) = enc.encode(&b);
+        assert_eq!(payload_ftype(&m2), 1, "without detection the cut frame stays inter");
     }
 
     #[test]

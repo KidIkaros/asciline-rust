@@ -72,6 +72,9 @@ struct Args {
     /// Skip the PSNR/SSIM quality report (faster compiles, scripting).
     #[arg(long)]
     no_quality: bool,
+    /// Disable scene-cut keyframe insertion (strict every-48-frames schedule).
+    #[arg(long)]
+    no_scene_cut: bool,
 
     /// Output base name (no extension).
     #[arg(long)]
@@ -193,6 +196,14 @@ fn main() -> Result<()> {
         let mut pe = ProfileEncoder::new(cols as usize, rows as usize, args.qf.clamp(1, 100));
         if args.hard {
             pe.level = 9; // --hard applies to the profile's zlib stage too
+        }
+        if !args.no_scene_cut {
+            // scene-cut keyframes: when luma stops resembling the previous
+            // reconstruction, motion prediction is useless — re-encode the
+            // frame as a fresh keyframe (better quality at cuts, usually a
+            // smaller file too). Keyframes are self-describing, so every
+            // ASCILINE decoder handles them at any point in the stream.
+            pe.scene_cut_mad = asciline::profile::SCENE_CUT_MAD;
         }
         Some(pe)
     } else {

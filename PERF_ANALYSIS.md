@@ -98,7 +98,49 @@ server would decimate to 30. `--fps 120` and beyond are equally supported.
 | 480 cols @60 fps | 10.44 s | 10 s / 600 frames | real-time at 60 fps |
 | 720p source, 560 cols @60 fps | 5.31 s | 5 s / 300 frames | real-time at 60 fps |
 
-## 4. What you can push further
+## 4. The `--profile` compiler is parallel too
+
+The lossy DCT profile compiler (`asciline-compile --profile`) was also
+single-threaded at first and is now parallel end-to-end, with the same
+bit-exactness guarantees as everything else:
+
+- **Blocks** (rayon): every 8×8 block's motion search, prediction, DCT,
+  quantization, skip decision and reconstruction are independent — computed in
+  a parallel phase. The serial phase then assembles the skip mask, motion
+  vectors and the DC-DPCM'd zigzag stream in raster order (the DPCM predictor
+  chain is inherently serial).
+- **YUV conversions** (rayon): the RGB→YUV luma/chroma and the YUV→BGR
+  reconstruction loops are per-pixel independent, so they parallelize too.
+- **SSIM blur** (rayon + LUTs): the quality report's Gaussian blur is the
+  single biggest per-frame cost when the report is enabled (~60% of compile
+  instructions), so it parallelizes over pixels; mirror-index LUTs replace the
+  per-pixel `rem_euclid` (~4× faster even single-threaded), and all five
+  windowed moments (E[x], E[y], E[x²], E[y²], E[xy]) are batched into one
+  parallel pass.
+- **zlib**: `flate2` now uses the `zlib-rs` backend (Cloudflare's memory-safe
+  pure-Rust zlib, no C deps) instead of miniz_oxide — faster deflate, same
+  wire format (the compressed bytes are different but equally valid zlib, and
+  decode compatibility is what the differential harnesses verify).
+
+Every one of these is verified **bit-identical to the serial build**: a
+thread-count determinism test (1 vs 8 threads), the cross-implementation
+vectors against `codec.py`/`codec.js` (decode side), and end-to-end `cmp`
+identity of the `.ascf` output across thread counts and with/without the
+quality report.
+
+Measured on a 15 s 720p clip (450 frames, 480 cols, 12 cores):
+
+| build | time |
+|---|---|
+| original single-threaded compiler | ~31 s |
+| parallel, quality report on | ~17 s (2.0×) |
+| parallel, `--no-quality` (SSIM skipped) | ~4.4 s (7×) |
+
+`--no-quality` used to skip only the *printed* report while still computing the
+SSIM — the dominant per-frame cost. It now skips the computation entirely
+(`ProfileEncoder::collect_stats`), which is where the extra 4× comes from.
+
+## 5. What you can push further
 
 - **`--fps 120`+** on the server: the client render loop (`app.js`) paces from
   `INIT`'s fps field and the canvas `fillText` path handles it; browsers
@@ -108,12 +150,13 @@ server would decimate to 30. `--fps 120` and beyond are equally supported.
   the practical ceiling is the client's canvas draw, not the server.
 - **`--quality high|balanced|low`** cuts wire bytes further via lossy temporal
   deltas (chars stay exact); bandwidth stops mattering before CPU does.
-- **SIMD / multithreaded zlib**: `flate2` can switch to `zlib-ng` or `zstd`
-  (`--features`), and the mapper is already row-parallel via rayon.
+- **SIMD / multithreaded zlib**: `zlib-rs` is already in; a parallel deflate
+  backend would help the (now relatively larger) serial zlib share of `--profile`
+  compiles, and the mapper is already row-parallel via rayon.
 - **Hardware decode**: `ffmpeg -hwaccel auto` can be added to the decode args
   for machines with GPU decoders; the Rust side is not the bottleneck.
 
-## 5. Caveats
+## 6. Caveats
 
 - The browser client is the *original* JS player. Its jitter buffer and
   `requestAnimationFrame` loop were tuned for 24–30 fps; at 60 fps it still

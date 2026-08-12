@@ -76,87 +76,124 @@ fn reflect(i: i64, n: usize) -> usize {
 /// loop regardless of thread count (the SSIM report is deterministic). This
 /// is the dominant cost of the per-frame quality report (~60% of compile
 /// time when enabled), so it scales with cores.
-fn blur(src: &[f64], w: usize, h: usize, k: &[f64; 11]) -> Vec<f64> {
-    // Rayon's parallel iterator adds per-chunk scheduling overhead; on a
-    // single-threaded pool (RAYON_NUM_THREADS=1) or tiny planes that exceeds
-    // the win, so fall back to the plain loop — same results, no slowdown.
-    if rayon::current_num_threads() <= 1 || w * h < 4096 {
-        return blur_serial(src, w, h, k);
-    }
-    // Mirror-index LUTs: the kernel taps are `reflect(x-5+ki, w)` for a fixed
-    // 11-tap window, so the per-pixel `rem_euclid` (i64 division, ~30 cycles)
-    // in the hot loop can be replaced by two small precomputed tables. Same
-    // samples, same results — just ~5-10x less arithmetic per pixel.
-    let kx: Vec<[usize; 11]> = (0..w)
-        .map(|x| std::array::from_fn(|ki| reflect(x as i64 - 5 + ki as i64, w)))
-        .collect();
-    let ky: Vec<[usize; 11]> = (0..h)
-        .map(|y| std::array::from_fn(|ki| reflect(y as i64 - 5 + ki as i64, h)))
-        .collect();
+/// Mirror-index LUTs for one plane geometry. Built once per SSIM call and
+/// shared by all five blur passes — replaces the per-pixel `rem_euclid` (i64
+/// division, ~30 cycles) in the hot loop with table lookups. Same samples,
+/// same results, ~5-10x less arithmetic per pixel.
+struct BlurLuts {
+    w: usize,
+    h: usize,
+    kx: Vec<[usize; 11]>,
+    ky: Vec<[usize; 11]>,
+}
 
-    let mut tmp = vec![0.0f64; w * h];
-    // horizontal pass: each output row depends only on its own input row
-    tmp.par_chunks_mut(w)
-        .enumerate()
-        .for_each(|(y, row)| {
+impl BlurLuts {
+    fn new(w: usize, h: usize) -> BlurLuts {
+        let kx: Vec<[usize; 11]> = (0..w)
+            .map(|x| std::array::from_fn(|ki| reflect(x as i64 - 5 + ki as i64, w)))
+            .collect();
+        let ky: Vec<[usize; 11]> = (0..h)
+            .map(|y| std::array::from_fn(|ki| reflect(y as i64 - 5 + ki as i64, h)))
+            .collect();
+        BlurLuts { w, h, kx, ky }
+    }
+
+    /// Separable blur of five planes in a single parallel pass (horizontal for
+    /// all, then vertical for all). The SSIM window needs five blurred fields
+    /// (E[x], E[y], E[x²], E[y²], E[xy]); batching them amortizes the rayon
+    /// scheduling and keeps the mirror LUTs warm in cache. Results are
+    /// bit-identical to five separate `blur` calls.
+    fn blur5(&self, srcs: [&[f64]; 5], k: &[f64; 11]) -> [Vec<f64>; 5] {
+        let w = self.w;
+        let h = self.h;
+        let n = w * h;
+        // Each pass computes a `[f64; 5]` per pixel (one value per plane) and
+        // collects in parallel; the small serial transpose at the end scatters
+        // them into the five planes. Rayon's `map`/`collect` avoids any shared
+        // mutable state, and every dot product is identical to the serial loop.
+        let horiz: Vec<[f64; 5]> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let y = i / w;
+                let x = i % w;
+                let base = y * w;
+                let kx = &self.kx[x];
+                let mut accs = [0.0f64; 5];
+                for (ti, src) in srcs.iter().enumerate() {
+                    let mut acc = 0.0;
+                    for (ki, &kw) in k.iter().enumerate() {
+                        acc += kw * src[base + kx[ki]];
+                    }
+                    accs[ti] = acc;
+                }
+                accs
+            })
+            .collect();
+        let vert: Vec<[f64; 5]> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let y = i / w;
+                let x = i % w;
+                let ky = &self.ky[y];
+                let mut accs = [0.0f64; 5];
+                for (ti, acc) in accs.iter_mut().enumerate() {
+                    let mut a = 0.0;
+                    for (ki, &kw) in k.iter().enumerate() {
+                        a += kw * horiz[ky[ki] * w + x][ti];
+                    }
+                    *acc = a;
+                }
+                accs
+            })
+            .collect();
+        let mut outs = [vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n]];
+        for i in 0..n {
+            let v = vert[i];
+            for (ti, out) in outs.iter_mut().enumerate() {
+                out[i] = v[ti];
+            }
+        }
+        outs
+    }
+
+    /// Same five-plane blur without rayon (single-threaded pools: the parallel
+    /// iterator's scheduling overhead exceeds the win). Bit-identical results.
+    #[allow(clippy::needless_range_loop)]
+    fn blur5_serial(&self, srcs: [&[f64]; 5], k: &[f64; 11]) -> [Vec<f64>; 5] {
+        let w = self.w;
+        let h = self.h;
+        let n = w * h;
+        let mut tmps = [vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n]];
+        for i in 0..n {
+            let y = i / w;
+            let x = i % w;
             let base = y * w;
-            for (x, cell) in row.iter_mut().enumerate() {
+            let kx = &self.kx[x];
+            for (ti, src) in srcs.iter().enumerate() {
                 let mut acc = 0.0;
                 for (ki, &kw) in k.iter().enumerate() {
-                    acc += kw * src[base + kx[x][ki]];
+                    acc += kw * src[base + kx[ki]];
                 }
-                *cell = acc;
+                tmps[ti][i] = acc;
             }
-        });
-    let mut out = vec![0.0f64; w * h];
-    // vertical pass: each output row reads only `tmp` (read-only here)
-    out.par_chunks_mut(w)
-        .enumerate()
-        .for_each(|(y, row)| {
-            let ky_row = &ky[y];
-            for (x, cell) in row.iter_mut().enumerate() {
+        }
+        let mut outs = [vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n]];
+        for i in 0..n {
+            let y = i / w;
+            let ky = &self.ky[y];
+            for (ti, tmp) in tmps.iter().enumerate() {
                 let mut acc = 0.0;
                 for (ki, &kw) in k.iter().enumerate() {
-                    acc += kw * tmp[ky_row[ki] * w + x];
+                    acc += kw * tmp[ky[ki] * w + (i % w)];
                 }
-                *cell = acc;
+                outs[ti][i] = acc;
             }
-        });
-    out
+        }
+        outs
+    }
 }
 
-/// Plain serial blur (the original loop — identical results, no rayon
-/// overhead). Used on single-threaded pools and tiny planes.
-fn blur_serial(src: &[f64], w: usize, h: usize, k: &[f64; 11]) -> Vec<f64> {
-    let kx: Vec<[usize; 11]> = (0..w)
-        .map(|x| std::array::from_fn(|ki| reflect(x as i64 - 5 + ki as i64, w)))
-        .collect();
-    let ky: Vec<[usize; 11]> = (0..h)
-        .map(|y| std::array::from_fn(|ki| reflect(y as i64 - 5 + ki as i64, h)))
-        .collect();
-    let mut tmp = vec![0.0f64; w * h];
-    for y in 0..h {
-        let row = y * w;
-        for x in 0..w {
-            let mut acc = 0.0;
-            for (ki, &kw) in k.iter().enumerate() {
-                acc += kw * src[row + kx[x][ki]];
-            }
-            tmp[row + x] = acc;
-        }
-    }
-    let mut out = vec![0.0f64; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let mut acc = 0.0;
-            for (ki, &kw) in k.iter().enumerate() {
-                acc += kw * tmp[ky[y][ki] * w + x];
-            }
-            out[y * w + x] = acc;
-        }
-    }
-    out
-}
+
 
 /// Structural similarity between two `w`×`h` byte planes (1.0 = identical).
 ///
@@ -176,11 +213,16 @@ pub fn ssim(a: &[u8], b: &[u8], w: usize, h: usize) -> f64 {
     let a2: Vec<f64> = af.iter().map(|&v| v * v).collect();
     let b2: Vec<f64> = bf.iter().map(|&v| v * v).collect();
     let ab: Vec<f64> = af.iter().zip(&bf).map(|(&x, &y)| x * y).collect();
-    let mu_a = blur(&af, w, h, &k);
-    let mu_b = blur(&bf, w, h, &k);
-    let e_a2 = blur(&a2, w, h, &k);
-    let e_b2 = blur(&b2, w, h, &k);
-    let e_ab = blur(&ab, w, h, &k);
+    // Mirror LUTs built once, then all five windowed moments in one pass
+    // (amortizes rayon scheduling + LUT construction across planes). On a
+    // single-threaded pool the parallel iterator's overhead exceeds the win,
+    // so fall back to the plain loop — same results, no slowdown.
+    let luts = BlurLuts::new(w, h);
+    let [mu_a, mu_b, e_a2, e_b2, e_ab] = if rayon::current_num_threads() <= 1 {
+        luts.blur5_serial([&af, &bf, &a2, &b2, &ab], &k)
+    } else {
+        luts.blur5([&af, &bf, &a2, &b2, &ab], &k)
+    };
 
     const C1: f64 = 6.5025; // (0.01 * 255)²
     const C2: f64 = 58.5225; // (0.03 * 255)²

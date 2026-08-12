@@ -58,7 +58,15 @@ with the original, so the unchanged browser client in `web/` works as-is. See
 - Rayon-parallel SSIM blur (the report's dominant cost): each output pixel is
   an independent dot product, so the blur parallelizes over rows with
   bit-identical results; mirror-index LUTs replace the per-pixel `rem_euclid`
-  in the hot loop (~4x faster single-threaded too).
+  in the hot loop (~4x faster single-threaded too). All five windowed moments
+  are batched into a single parallel pass (LUTs built once per SSIM).
+- Parallel RGB↔YUV conversions (per-pixel independent) and a `zlib-rs`
+  backend for `flate2` (Cloudflare's memory-safe pure-Rust zlib, no C deps) —
+  the remaining serial tail. `--no-quality` compiles dropped 7.1 s → 4.4 s on
+  a 450-frame 720p clip at 480 cols; report-on compiles ~31 s → ~17 s.
+- `--quality-threshold N`: CI quality gate — `asciline-compile` exits non-zero
+  when the mean PSNR-Y of the lossy reconstruction falls below N dB (requires
+  the quality report and a lossy compile).
 
 ### Performance
 

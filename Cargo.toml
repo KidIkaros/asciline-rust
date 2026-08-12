@@ -30,8 +30,9 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "tokio"] }
 futures-util = "0.3"
 
-# Compression (zlib) - pure Rust backend, no C deps
-flate2 = "1"
+# Compression (zlib) - zlib-rs backend: pure Rust (no C deps), ~2x faster
+# deflate than the default miniz_oxide and memory-safe (Cloudflare).
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 
 # Parallelism for the frame mapper
 rayon = "1"

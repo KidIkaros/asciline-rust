@@ -160,12 +160,19 @@ The encoder itself is **parallelized with rayon**: every 8×8 block (motion
 search, prediction, DCT, quantization, skip decision, reconstruction) is
 computed independently in a parallel phase, then a serial phase assembles the
 skip mask, motion vectors and the DC-DPCM'd zigzag stream in raster order
-(the DPCM predictor chain is inherently serial). Output is bit-identical
-regardless of thread count — verified by a determinism test (1 vs 8 threads)
-and by the cross-implementation vectors. Measured on a 15 s 720p clip at 480
-cols (450 frames, 12 cores): **~31 s → ~16 s** with the quality report, and
-**~7 s** with `--no-quality` (which now skips the SSIM computation, not just
-its printed lines).
+(the DPCM predictor chain is inherently serial). The RGB↔YUV conversions and
+the report's SSIM blur are parallel too (the blur batches all five windowed
+moments into one pass and uses mirror-index LUTs instead of per-pixel
+`rem_euclid`), and zlib runs on the faster pure-Rust `zlib-rs` backend.
+Output is bit-identical regardless of thread count — verified by a
+determinism test (1 vs 8 threads) and by the cross-implementation vectors.
+Measured on a 15 s 720p clip at 480 cols (450 frames, 12 cores): **~31 s →
+~17 s** with the quality report, and **~4.4 s** with `--no-quality` (which
+now skips the SSIM computation, not just its printed lines).
+
+`--quality-threshold N` turns the report into a **CI quality gate**: the
+compile exits non-zero when the mean PSNR-Y of the lossy reconstruction falls
+below N dB (requires a lossy compile and the quality report).
 Note: combining `--profile` with `--quantize` measures against the
 pre-quantized source, so the color numbers then look better than they would
 against the original video.
@@ -224,6 +231,8 @@ in the bit-exact decode direction, which is what the tests verify.
 
 ```bash
 cargo test                    # 40 unit tests: codec + profile round-trips (incl. DELTA wire format + tolerance semantics + scene-cut keyframes + thread-count determinism), mapper, filters, protocol, quality
+
+`asciline-compile --profile --quality-threshold 35 clip.mp4` # fail CI if mean PSNR-Y < 35 dB
 
 # Cross-implementation, bit-exact codec checks (adaptive):
 python3 experiments/gen_python_vectors.py > experiments/vectors_python.bin

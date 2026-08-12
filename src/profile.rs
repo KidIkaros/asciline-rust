@@ -266,34 +266,50 @@ impl ProfileEncoder {
         let mut cb = vec![0u8; cw * ch];
         let mut cr = vec![0u8; cw * ch];
 
-        for i in 0..w * h {
-            let b = frame_bgr[i * 3] as f32;
-            let g = frame_bgr[i * 3 + 1] as f32;
-            let r = frame_bgr[i * 3 + 2] as f32;
-            let v = (0.299 * r + 0.587 * g) + 0.114 * b; // left fold in f32
-            y[i] = (v.clamp(0.0, 255.0)) as u8;
-        }
+        // Luma: one f32 left-fold per pixel — parallel over pixels (each output
+        // depends only on its own input, so results are bit-identical to serial).
+        y.par_iter_mut()
+            .enumerate()
+            .for_each(|(i, out)| {
+                let b = frame_bgr[i * 3] as f32;
+                let g = frame_bgr[i * 3 + 1] as f32;
+                let r = frame_bgr[i * 3 + 2] as f32;
+                let v = (0.299 * r + 0.587 * g) + 0.114 * b; // left fold in f32
+                *out = (v.clamp(0.0, 255.0)) as u8;
+            });
 
-        for cy in 0..ch {
-            for cx in 0..cw {
+        // Chroma: each 2×2 block is independent — parallel over blocks. Each
+        // pixel computes its own (cb, cr) pair, collected in order (bit-exact
+        // vs the serial loop).
+        let chroma: Vec<(u8, u8)> = (0..ch * cw)
+            .into_par_iter()
+            .map(|k| {
+                let cy = k / cw;
+                let cx = k % cw;
                 // 2×2 block (C-order: y0x0, y0x1, y1x0, y1x1). numpy's mean over
                 // the 2×2 uses pairwise summation: ((a+b)+(c+d))/4 — match it
                 // bit-for-bit with the same association in f32.
                 let mut acc_cb = [0.0f32; 4];
                 let mut acc_cr = [0.0f32; 4];
-                for (k, (dy, dx)) in [(0usize, 0usize), (0, 1), (1, 0), (1, 1)].iter().enumerate() {
+                for (i, (dy, dx)) in [(0usize, 0usize), (0, 1), (1, 0), (1, 1)].iter().enumerate() {
                     let idx = ((cy * 2 + dy) * w + (cx * 2 + dx)) * 3;
                     let b = frame_bgr[idx] as f32;
                     let g = frame_bgr[idx + 1] as f32;
                     let r = frame_bgr[idx + 2] as f32;
-                    acc_cb[k] = (128.0 - 0.168736 * r) - 0.331264 * g + 0.5 * b;
-                    acc_cr[k] = (128.0 + 0.5 * r) - 0.418688 * g - 0.081312 * b;
+                    acc_cb[i] = (128.0 - 0.168736 * r) - 0.331264 * g + 0.5 * b;
+                    acc_cr[i] = (128.0 + 0.5 * r) - 0.418688 * g - 0.081312 * b;
                 }
                 let sum_cb = (acc_cb[0] + acc_cb[1]) + (acc_cb[2] + acc_cb[3]);
                 let sum_cr = (acc_cr[0] + acc_cr[1]) + (acc_cr[2] + acc_cr[3]);
-                cb[cy * cw + cx] = ((sum_cb / 4.0).clamp(0.0, 255.0)) as u8;
-                cr[cy * cw + cx] = ((sum_cr / 4.0).clamp(0.0, 255.0)) as u8;
-            }
+                (
+                    ((sum_cb / 4.0).clamp(0.0, 255.0)) as u8,
+                    ((sum_cr / 4.0).clamp(0.0, 255.0)) as u8,
+                )
+            })
+            .collect();
+        for (k, (c, r)) in chroma.into_iter().enumerate() {
+            cb[k] = c;
+            cr[k] = r;
         }
 
         // ── keyframe vs inter ──
@@ -706,9 +722,14 @@ fn enc_plane(
 fn yuv_to_bgr(y: &[u8], cb: &[u8], cr: &[u8], w: usize, h: usize) -> Vec<u8> {
     let cw = w / 2;
     let mut out = vec![0u8; w * h * 3];
-    for yy in 0..h {
-        let cy = yy >> 1;
-        for x in 0..w {
+    // Each output pixel depends only on its own luma/chroma samples and writes
+    // a disjoint 3-byte run — parallel over pixels, bit-identical to serial.
+    out.par_chunks_exact_mut(3)
+        .enumerate()
+        .for_each(|(i, px)| {
+            let yy = i / w;
+            let x = i % w;
+            let cy = yy >> 1;
             let cx = x >> 1;
             let yv = y[yy * w + x] as i32;
             let cbv = cb[cy * cw + cx] as i32 - 128;
@@ -716,12 +737,10 @@ fn yuv_to_bgr(y: &[u8], cb: &[u8], cr: &[u8], w: usize, h: usize) -> Vec<u8> {
             let r = yv + ((359 * crv + 128) >> 8);
             let g = yv - ((88 * cbv + 183 * crv + 128) >> 8);
             let b = yv + ((454 * cbv + 128) >> 8);
-            let o = (yy * w + x) * 3;
-            out[o] = b.clamp(0, 255) as u8;
-            out[o + 1] = g.clamp(0, 255) as u8;
-            out[o + 2] = r.clamp(0, 255) as u8;
-        }
-    }
+            px[0] = b.clamp(0, 255) as u8;
+            px[1] = g.clamp(0, 255) as u8;
+            px[2] = r.clamp(0, 255) as u8;
+        });
     out
 }
 

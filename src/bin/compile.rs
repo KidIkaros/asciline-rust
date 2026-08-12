@@ -72,6 +72,10 @@ struct Args {
     /// Skip the PSNR/SSIM quality report (faster compiles, scripting).
     #[arg(long)]
     no_quality: bool,
+    /// Exit non-zero when the mean PSNR-Y of the lossy reconstruction falls
+    /// below this dB floor (CI quality gate; requires the quality report).
+    #[arg(long)]
+    quality_threshold: Option<f64>,
     /// Disable scene-cut keyframe insertion (strict every-48-frames schedule).
     #[arg(long)]
     no_scene_cut: bool,
@@ -349,6 +353,29 @@ fn main() -> Result<()> {
                 ),
             );
         }
+    }
+
+    // ── CI quality gate: exit non-zero when the reconstruction is worse than
+    //    the requested floor (mean PSNR-Y over the whole clip). ──
+    if let Some(floor) = args.quality_threshold {
+        if args.no_quality {
+            bail!("--quality-threshold requires the quality report (drop --no-quality)");
+        }
+        let mean = if let Some(pen) = profile_enc.as_ref() {
+            pen.stats().psnr_y_mean()
+        } else if adaptive_quality && adaptive_stats.frames() > 0 {
+            adaptive_stats.psnr_y_mean()
+        } else {
+            bail!("--quality-threshold needs a lossy compile (--profile, or --pixel with --tolerance/--quantize)");
+        };
+        // ∞ mean (lossless reconstruction) is strictly better than any finite
+        // floor, so only finite means below the floor fail the gate.
+        if mean.is_finite() && mean < floor {
+            bail!(
+                "quality gate failed: mean PSNR-Y {mean:.2} dB < required {floor:.2} dB"
+            );
+        }
+        println!("[Quality] gate passed: mean PSNR-Y {mean:.2} dB ≥ {floor:.2} dB");
     }
     Ok(())
 }

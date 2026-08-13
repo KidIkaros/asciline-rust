@@ -71,6 +71,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
 
 - `TAG_RLE_FULL` decode could panic on a truncated run (`body[off+2..off+2+cell]`
   without a bounds check).
+- Profile decoder panicked on crafted keyframe grids (found by the new
+  libFuzzer harness, `fuzz/artifacts` in the nightly CI job): a 1×N grid has
+  empty chroma planes and an odd width/height leaves the last luma row/column
+  without chroma — both made `yuv_to_bgr` index out of bounds. The keyframe
+  validation now requires even w,h >= 2 (real grids are multiples of 16), and
+  a regression test covers every rejected shape plus a legal 2×2 grid.
 
 ## [0.1.0] — 2026-08-12
 

@@ -812,8 +812,18 @@ impl ProfileDecoder {
             let h = ((payload[4] as usize) << 8) | payload[5] as usize;
             // Reject absurd grids BEFORE allocating planes: a crafted keyframe
             // header previously requested up to 25 GB (65535² × 3 planes × 2
-            // buffers), which aborts on OOM.
-            if w == 0 || h == 0 || (w as u64) * (h as u64) > MAX_GRID_PIXELS {
+            // buffers), which aborts on OOM. Also require w,h >= 2 and EVEN
+            // (both found by fuzzing): the chroma planes are w/2 × h/2, so a
+            // 1×N grid has EMPTY chroma planes and an odd w/h leaves the last
+            // luma row/column without chroma — either way yuv_to_bgr indexes
+            // out of bounds and panics. Real grids are multiples of 16 (the
+            // compiler pads).
+            if w < 2
+                || h < 2
+                || !w.is_multiple_of(2)
+                || !h.is_multiple_of(2)
+                || (w as u64) * (h as u64) > MAX_GRID_PIXELS
+            {
                 bail!("profile grid {w}x{h} out of bounds");
             }
             off = 6;
@@ -1206,6 +1216,41 @@ mod tests {
     #[should_panic(expected = "multiples of 16")]
     fn rejects_non_16_grid() {
         let _ = ProfileEncoder::new(40, 32, 70);
+    }
+
+    #[test]
+    fn rejects_tiny_keyframe_grids() {
+        // A crafted keyframe declaring a 1×1 grid has EMPTY chroma planes
+        // (w/2 × h/2 = 0); yuv_to_bgr used to index cb[0] and panic. Must bail.
+        let mut dec = ProfileDecoder::new();
+        let mut msg = vec![0u8, 0, 0, 0, TAG_PROFILE];
+        // payload: ftype=0 (keyframe), QF=70, w=1, h=1, then three empty planes
+        msg.extend_from_slice(&zlib_compress(&[0, 70, 0, 1, 0, 1], 6));
+        assert!(
+            dec.decode(&msg).is_err(),
+            "1x1 keyframe grid must be rejected, not panic"
+        );
+        // 1×N and N×1 are just as invalid (chroma is empty either way)
+        let mut msg2 = vec![0u8, 0, 0, 0, TAG_PROFILE];
+        msg2.extend_from_slice(&zlib_compress(&[0, 70, 0, 1, 1, 0], 6));
+        assert!(dec.decode(&msg2).is_err(), "1xN grid must be rejected");
+        let mut msg3 = vec![0u8, 0, 0, 0, TAG_PROFILE];
+        msg3.extend_from_slice(&zlib_compress(&[0, 70, 1, 0, 0, 1], 6));
+        assert!(dec.decode(&msg3).is_err(), "Nx1 grid must be rejected");
+        // odd w or h: the last luma row/column has no chroma (w/2 × h/2),
+        // so yuv_to_bgr would index one past the chroma plane — must bail
+        for (w, h) in [(3u8, 2u8), (2, 3), (5, 5), (3, 7)] {
+            let mut m = vec![0u8, 0, 0, 0, TAG_PROFILE];
+            m.extend_from_slice(&zlib_compress(&[0, 70, 0, w, 0, h], 6));
+            assert!(
+                dec.decode(&m).is_err(),
+                "odd grid {w}x{h} must be rejected, not panic"
+            );
+        }
+        // a legal tiny grid (2×2) still decodes without panicking
+        let mut msg4 = vec![0u8, 0, 0, 0, TAG_PROFILE];
+        msg4.extend_from_slice(&zlib_compress(&[0, 70, 0, 2, 0, 2], 6));
+        assert!(dec.decode(&msg4).is_ok(), "2x2 grid must decode");
     }
 
     #[test]

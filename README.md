@@ -264,8 +264,9 @@ comparison for this port, rendered **by our own decoders**: `asciline-render`
 headlessly rasterizes the compiled `.ascf` (pixel mode = coloured blocks, ASCII
 mode = the palette characters in an 8×8 bitmap font) straight from the codec
 frames a player would decode. Source: an 8 s, 640×360 excerpt of the
-Creative-Commons-licensed **Big Buck Bunny** cartoon; attribution and
-checksums are in [`samples/SOURCE.md`](samples/SOURCE.md).
+Creative-Commons-licensed **Big Buck Bunny** cartoon — © Blender Foundation /
+peach.blender.org, CC BY 3.0. Full attribution and checksums are in
+[`samples/SOURCE.md`](samples/SOURCE.md).
 
 | Output | What it is | File |
 | :--- | :--- | :--- |
@@ -352,10 +353,12 @@ quality-metric definitions, and reproduction methodology.
 ### Real 60 fps footage (drone flight)
 
 The cartoon is 30 fps, so it cannot *show* faster-than-30 playback. For that,
-the evidence uses a genuine **720p60 drone flight** (CC BY 3.0, ~482 unique
-hashes across 480 decoded frames — real aerial motion, not duplicated frames).
-It is compiled and rendered at its native **60 fps** (`--fps 60`, because the
-offline compiler otherwise keeps the original's >30 fps decimation default):
+the evidence uses a genuine **720p60 drone flight** — *Family Christmas Drone
+Flight 4k 60FPS, Nashville, Michigan* by Joseph Challender, CC BY 3.0
+(~482 unique hashes across 480 decoded frames — real aerial motion, not
+duplicated frames). It is compiled and rendered at its native **60 fps**
+(`--fps 60`, because the offline compiler otherwise keeps the original's >30
+fps decimation default):
 
 <img src="samples/evidence/drone_compare.gif" width="960" alt="60 fps drone flight source, lossless pixel, and lossy profile comparison"/>
 

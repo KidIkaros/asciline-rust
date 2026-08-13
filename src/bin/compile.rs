@@ -91,6 +91,22 @@ struct Args {
     /// unknown tag).
     #[arg(long)]
     no_hpel: bool,
+    /// Disable quarter-pixel motion compensation: emit tag 6 (half-pel)
+    /// instead of the default tag 7. Quarter-pel refines through the half-pel
+    /// ladder to quarter-pel precision and the decoder interpolates the luma
+    /// reference with H.264's 6-tap half-pel filter + bilinear quarter-pel
+    /// step — a strict superset of half-pel (every half-pel vector is
+    /// representable in quarter-pel units, so it is never worse). Requires
+    /// the browser decoder at web/codec.js >= this commit.
+    #[arg(long)]
+    no_qpel: bool,
+    /// Use plain bilinear interpolation for quarter-pel motion instead of
+    /// H.264's 6-tap filter (encoder-side experiment: the 6-tap is sharper
+    /// but can ring on tiny grids; measured quality/size differ per content).
+    /// Decoders always implement the 6-tap tag-7 spec, so streams stay
+    /// interoperable — this only changes which vectors the encoder picks.
+    #[arg(long)]
+    qpel_bilinear: bool,
     /// Maximum zlib compression (level 9) — slower, smaller file.
     #[arg(long)]
     hard: bool,
@@ -176,8 +192,15 @@ fn main() -> Result<()> {
     let (cols, rows) = if profile {
         let pc = cols.div_ceil(16) * 16;
         let pr = rows.div_ceil(16) * 16;
-        let hpel = !args.no_hpel; // tag 6 (half-pel) is the default
-        let tag = if hpel {
+        // Sub-pel motion ladder: tag 7 (quarter-pel) is the default — a strict
+        // superset of tag 6 (half-pel), which is a strict superset of the
+        // original integer search; --no-qpel falls back to tag 6, and
+        // --no-hpel to tags 5/4.
+        let qpel = !args.no_qpel && !args.no_hpel;
+        let hpel = !args.no_hpel && !qpel;
+        let tag = if qpel {
+            7
+        } else if hpel {
             6
         } else if args.aq > 0 {
             5
@@ -188,7 +211,9 @@ fn main() -> Result<()> {
         if args.aq > 0 {
             aq_note.push_str(&format!(" | AQ={} levels", args.aq));
         }
-        if hpel {
+        if qpel {
+            aq_note.push_str(" | quarter-pel motion");
+        } else if hpel {
             aq_note.push_str(" | half-pel motion");
         }
         aq_note.push_str(&format!(" (tag {tag})"));
@@ -254,7 +279,11 @@ fn main() -> Result<()> {
         pe.r_search = args.r_search.max(0);
         pe.rdo_lambda = args.rdo_lambda.max(0.0);
         pe.aq_levels = args.aq;
-        pe.hpel = !args.no_hpel; // tag 6 (half-pel) is the compiler default
+        // Sub-pel ladder: tag 7 (quarter-pel) is the compiler default; qpel
+        // wins over hpel (a strict superset), and --no-hpel disables both.
+        pe.qpel = !args.no_qpel && !args.no_hpel;
+        pe.hpel = !args.no_hpel && !pe.qpel;
+        pe.qpel_6tap = !args.qpel_bilinear;
         if args.hard {
             pe.level = 9; // --hard applies to the profile's zlib stage too
         }

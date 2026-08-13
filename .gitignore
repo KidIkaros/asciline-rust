@@ -7,6 +7,8 @@ experiments/vectors_rust.bin
 experiments/vectors_profile_rust.bin
 experiments/vectors_profile_aq_rust.bin
 experiments/vectors_profile_hpel_rust.bin
+experiments/vectors_profile_qpel_rust.bin
+experiments/vectors_profile_deblock_rust.bin
 experiments/gen_python.log
 *.ascf
 # ...except the committed format-evidence samples

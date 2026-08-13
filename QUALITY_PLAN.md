@@ -59,7 +59,7 @@ a future tag-6 could add real rate control to make it rate-neutral.
 `aq=2` beat `aq=4` on both size and quality in our measurements, so it is the
 recommended setting.
 
-### 2. Subpixel motion estimation (half-pel, then quarter-pel) — *tag-6, done (half-pel)*
+### 2. Subpixel motion estimation (half-pel, then quarter-pel) — *tags 6/7, done*
 
 - *"PSNR improvements … up to 1.5 dB"* from half- and quarter-pixel estimation
   vs integer — [ScienceDirect](https://www.sciencedirect.com/topics/engineering/subpixels);
@@ -70,26 +70,24 @@ recommended setting.
 - **Signal cost:** fractional MV components + interpolation on the decode side
   → new tag (6).
 
-**Implemented (tag 6, now the compiler default; `--no-hpel` restores tag 5,
-`--no-hpel --aq 0` the tag-4 bit-exact stream):** the motion search runs
-its integer pass (±7) and then refines the best vector(s) to half-pel
-precision with the interpolated SAD (the standard two-stage H.264 approach,
-~9 extra candidates per block). The wire MVs are half-pel units (`i8`,
-2× displacement + fractional bit) and the decoder interpolates the luma
-reference bilinearly — `(A+B+1)>>1` / `(A+B+C+D+2)>>2`, integer, edge-clamped
-— with identical math in Rust and `web/codec.js` (proven by `node
-experiments/check_profile_hpel_vectors.js`, wired into CI). Because even
-half-pel displacements are plain integer motion, tag 6 is a strict superset
-of tag 5: the encoder can always fall back to an integer vector, so it is
-never worse. AQ composes with half-pel (tag-6 keyframes always carry the
-`aq_levels` byte, 0 = off). Note this is plain bilinear interpolation, not
-H.264's 6-tap half-pel filter — a cheap and sufficient first step; the fuzz
-corpus generator pins `--no-hpel --aq 0` so the committed seeds stay
-byte-stable.
+**Implemented (tag 6, superseded as the default by tag 7 — quarter-pel — in
+the same release; `--no-qpel` restores tag 6, `--no-hpel` tags 5/4):** the
+motion search runs its integer pass (±7) and then refines the best vector(s)
+to half-pel precision with the interpolated SAD (the standard two-stage H.264
+approach, ~9 extra candidates per block). The wire MVs are half-pel units
+(`i8`, 2× displacement + fractional bit) and the decoder interpolates the
+luma reference bilinearly — `(A+B+1)>>1` / `(A+B+C+D+2)>>2`, integer,
+edge-clamped — with identical math in Rust and `web/codec.js` (proven by
+`node experiments/check_profile_hpel_vectors.js`, wired into CI). Because
+even half-pel displacements are plain integer motion, tag 6 is a strict
+superset of tag 5: the encoder can always fall back to an integer vector, so
+it is never worse. AQ composes with half-pel (tag-6 keyframes always carry
+the `aq_levels` byte, 0 = off). The fuzz corpus generator pins
+`--no-hpel --aq 0` so the committed seeds stay byte-stable.
 
 **Measured (QF=70, cols=240, native fps):**
 
-| source | tag-5 (`--aq 2`) | tag-6 (default) | Δ |
+| source | tag-5 (`--aq 2`) | tag-6 | Δ |
 |---|---:|---:|---:|
 | Big Buck Bunny 30fps | 466,221 B / 38.82 / 0.9766 | 451,574 B / 39.54 / 0.9827 | **−3.1% size** AND +0.72 dB, +0.006 SSIM |
 | Drone 60fps | 402,566 B / 39.72 / 0.9575 | 416,711 B / 40.29 / 0.9632 | +3.5% size, **+0.57 dB**, +0.006 SSIM |
@@ -97,10 +95,37 @@ byte-stable.
 The honest read: on 30 fps content (large per-frame motion) half-pel is a
 strict win — smaller *and* sharper. On 60 fps content (small motion already
 near an integer grid) it is ~quality for free: the file barely moves while
-PSNR-Y climbs ~0.6 dB. This matches the research's +0.3–1.5 dB claim. Next
-step, if pursued: quarter-pel and/or the H.264 6-tap filter.
+PSNR-Y climbs ~0.6 dB. This matches the research's +0.3–1.5 dB claim.
 
-### 3. In-loop deblocking filter — *tag-5*
+### 3. Quarter-pixel motion — *done (tag 7, now the compiler default)*
+
+**Implemented (tag 7; `--no-qpel` restores tag 6):** the motion search
+refines through the half-pel ladder to quarter-pel precision, and both
+decoders interpolate the luma reference with H.264's 6-tap half-pel filter
+(`(A-5B+20C+20D-5E+F+16)>>5`) + bilinear quarter-pel step (`(A+B+1)>>1`),
+identical integer math in Rust and `web/codec.js` (proven by `node
+experiments/check_profile_qpel_vectors.js`, wired into CI — 95 frames
+bit-exact). Tag-7 keyframes always carry the `aq_levels` byte (0 = off), so
+AQ and scene cuts compose. `--qpel-bilinear` swaps the 6-tap for plain
+bilinear at quarter precision (encoder-side only; decoders always implement
+the 6-tap spec).
+
+**Measured (QF=70, cols=240, native fps):**
+
+| source | tag-6 (`--no-qpel`) | tag-7 (default) | Δ |
+|---|---:|---:|---:|
+| Big Buck Bunny 30fps | 451,574 B / 39.54 / 0.9827 | 472,221 B / 39.52 / 0.9816 | ≈neutral (−0.02 dB) at +4.6% size |
+| Drone 60fps | 416,711 B / 40.29 / 0.9632 | 467,210 B / 40.37 / 0.9640 | **+0.08 dB** at +12% size |
+
+The honest read: quarter-pel is a *small* quality win on camera motion (the
+drone's smooth pans land on true sub-pixel motion) at a real size cost —
+unlike AQ and half-pel, which were unambiguous wins. It stays the default
+because it is a strict superset (the search can always fall back to a
+half-pel/integer vector); the fixed-QF size growth is the rate-control-less
+trade-off, same as AQ. (The earlier 240-frame A/B at default fps measured
+the same shape: drone +0.09 dB at +8.4%.)
+
+### 4. In-loop deblocking filter — *measured, rejected*
 
 - H.264's in-loop deblocker *"significantly reduce[s] the blocking artifacts
   and improve[s] visual quality and prediction"* — [IJECCE](https://ijecce.org/administrator/components/com_jresearch/files/publications/IJECCE_2902_Final.pdf);
@@ -112,7 +137,18 @@ step, if pursued: quarter-pel and/or the H.264 6-tap filter.
 - **Signal cost:** none (it is decoder-defined), but it changes the decoded
   output → new tag and updated differential vectors.
 
-### 4. Better RDO (SATD) — *encoder-only, done*
+**Measured and REJECTED:** a boundary-strength deblock on the reconstructed
+reference (strength from QF + coded/skipped neighbors, three strength
+settings tried) was implemented on both decoders and A/B'd on the pinned
+clips. Every setting *lost* 2–6 dB PSNR-Y and grew the file 2–3× — this
+codec's DC-DPCM + dead-zone quantization does not produce H.264-style
+boundary steps for the filter to fix; the loop filter only adds smoothing
+error that the encoder then spends bits fighting. The code was reverted; if
+this is revisited, it needs a much stronger edge-detection guard (filter only
+edges that are actual quantizer steps, not texture) and an H.264-style
+strength ladder.
+
+### 5. Better RDO (SATD) — *encoder-only, done*
 
 - x264's motion/mode-decision ladder is SAD → **SATD** → RD, where SATD (sum
   of absolute Hadamard-transformed differences) is the cheap distortion proxy
@@ -128,7 +164,7 @@ step, if pursued: quarter-pel and/or the H.264 6-tap filter.
 - **Signal cost:** none. This only changes which bits the encoder emits; the
   stream format is untouched (verified by the differential harnesses).
 
-### 5. Psychovisual tuning — *encoder-only, metric caveat*
+### 6. Psychovisual tuning — *encoder-only, metric caveat*
 
 - x264's `psy-rd` deliberately trades PSNR for perceived quality (keeps
   texture/grain); x265 *"always tunes for highest perceived visual quality"* by
@@ -138,7 +174,7 @@ step, if pursued: quarter-pel and/or the H.264 6-tap filter.
   current metrics. Plan a visual A/B (or a perceptual metric like VMAF/SSIM
   window) before tuning these.
 
-### 6. Entropy backend (zstd) — *new container*
+### 7. Entropy backend (zstd) — *new container*
 
 - zlib→miniz_oxide already saved ~23% on adaptive. zstd (pure-Rust `ruzstd`)
   would likely add more on top, but it changes the wire format, so it belongs
@@ -151,16 +187,18 @@ step, if pursued: quarter-pel and/or the H.264 6-tap filter.
 | 0 (done) | Wider integer motion search (default ±7), opt-in RDO | none | BBB −2.7% size, +0.10 dB |
 | 1 (done) | SATD-based RDO (skip-threshold scaling measured, rejected) | none | better RDO Pareto |
 | 2 (done) | AQ: per-block QP, luma variance map (tag 5, `--aq 2` default, `--aq 4` / `--aq 0` opt) | tag-5 | +2.25 dB / +0.008 SSIM on BBB at +38% size; ~10% smaller at equal quality |
-| 3 (done) | Half-pel motion: integer search + bilinear subpel refine (tag 6, now the default; `--no-hpel` opt-out) | tag-6 | BBB −3.1% size AND +0.72 dB; drone +0.57 dB at +3.5% size |
-| 4 | In-loop deblock | tag-7 | QF≤40 perceptual win |
-| 5 | Quarter-pel + 6-tap half-pel filter | tag-7 | another ~0.3–0.7 dB on motion |
+| 3 (done) | Half-pel motion: integer search + bilinear subpel refine (tag 6; `--no-qpel` restores it) | tag-6 | BBB −3.1% size AND +0.72 dB; drone +0.57 dB at +3.5% size |
+| 3b (done) | Quarter-pel + 6-tap half-pel filter (tag 7, now the default; `--no-qpel` opt-out) | tag-7 | drone +0.08 dB at +12% size; BBB ≈neutral — small win on camera motion, honest size cost |
+| 4 | In-loop deblock (measured, rejected — see §3 note) | tag-8 | n/a |
+| 5 | Rate control: per-keyframe QF adaptation (e.g. `--target-size`) | none (QF is per-keyframe already) | hit a target size instead of fixed-QF roulette |
 
 ## Measuring
 
 - `experiments/measure_profile_ab.sh` — sweeps `--r-search`/`--rdo-lambda`,
-  `--aq` and `--hpel` and reports size + PSNR-Y/SSIM-Y + wall time.
+  `--aq`, `--hpel`/`--qpel` and reports size + PSNR-Y/SSIM-Y + wall time.
 - `experiments/make_samples.sh` — regenerates the committed quality matrix
   (QF 40/70/90) and the cartoon/drone evidence; source hashes are pinned.
 - Every tag change must update `web/codec.js`, the differential checkers
   (`check_profile_vectors.js` / `check_profile_aq_vectors.js` /
-  `check_profile_hpel_vectors.js`), and the fuzz corpus (pinned to tag 4).
+  `check_profile_hpel_vectors.js` / `check_profile_qpel_vectors.js`), and
+  the fuzz corpus (pinned to tag 4).

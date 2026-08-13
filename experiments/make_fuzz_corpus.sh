@@ -37,9 +37,9 @@ ffmpeg -y -v error \
 
 # tag-4 lossy DCT profile (cell-independent) — the deep DCT decoder paths.
 # Pin --r-search 3 (codec.py's radius), --aq 0 (tag 4, no AQ map) AND
-# --no-hpel (no tag-6 half-pel) so the committed seeds stay byte-stable
-# regardless of the compiler's newer defaults (r=7, aq=2 and hpel emit
-# different — tag-5/6 — bytes).
+# --no-qpel/--no-hpel (no tag-7/6 sub-pel) so the committed seeds stay
+# byte-stable regardless of the compiler's newer defaults (r=7, aq=2 and
+# quarter-pel emit different — tag-5/6/7 — bytes).
 "$BIN" "$TMP/clip.mkv" --cols 240 --profile --qf 70 --no-quality --r-search 3 --aq 0 --no-hpel --out "$TMP/prof" >/dev/null
 # adaptive, cell=4 (text mode, 16 M colours)
 "$BIN" "$TMP/clip.mkv" --cols 40 --mode 6 --tolerance 8 --no-quality --out "$TMP/adapt4" >/dev/null

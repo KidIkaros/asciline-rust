@@ -182,29 +182,31 @@ tag (5), decoded bit-exactly by `codec.js` and `asciline-player` — verify
 with `node experiments/check_profile_aq_vectors.js`.
 
 ```bash
-asciline-compile clip.mp4 --profile           # tag 6: --aq 2 + half-pel by default
+asciline-compile clip.mp4 --profile           # tag 7: --aq 2 + quarter-pel by default
 asciline-compile clip.mp4 --profile --aq 4    # 4-level AQ map (2 bits/block)
-asciline-compile clip.mp4 --profile --aq 0    # AQ off (still tag 6, half-pel)
+asciline-compile clip.mp4 --profile --aq 0    # AQ off (still tag 7, quarter-pel)
+asciline-compile clip.mp4 --profile --no-qpel # tag 6, half-pel motion
 asciline-compile clip.mp4 --profile --no-hpel # tag 5, integer motion only
 asciline-compile clip.mp4 --profile --no-hpel --aq 0   # tag 4, bit-exact with codec.py
 ```
 
-The default profile mode is **tag 6 — adaptive quantization AND half-pixel
+The default profile mode is **tag 7 — adaptive quantization AND quarter-pixel
 motion**. Measured at QF=70 (cols=240), the chain is:
 
 | stage | Big Buck Bunny size / PSNR-Y / SSIM-Y |
 |---|---:|
 | tag-4 (bit-exact `codec.py`) | 337 KB @ 36.57 dB / 0.9686 |
 | + AQ (tag 5, `--aq 2`) | 466 KB @ 38.82 dB / 0.9766 |
-| **+ half-pel (tag 6, default)** | **451 KB @ 39.54 dB / 0.9827** |
+| + half-pel (tag 6) | 451 KB @ 39.54 dB / 0.9827 |
+| **+ quarter-pel (tag 7, default)** | **472 KB @ 39.52 dB / 0.9816** |
 
-The 60 fps drone excerpt goes 240 KB @ 37.89 → 403 KB @ 39.72 → **417 KB @
-40.29 / 0.9632**. At **equal quality** the AQ story matches x264's claim:
-plain tag-4 needs QF≈84-85 (~500-516 KB on BBB) to reach ~38.8 dB, so AQ is
-roughly **10% smaller at the same PSNR-Y** — it spends bits where the eye
-looks instead of uniformly. Without rate control the fixed-QF size grows
-(detail-dense footage more so); that is the honest trade-off, and `--aq 2`
-beat `--aq 4` on both size and quality in our measurements.
+The 60 fps drone excerpt goes 240 KB @ 37.89 → 403 KB @ 39.72 → 417 KB @
+40.29 → **467 KB @ 40.37 / 0.9640**. At **equal quality** the AQ story matches
+x264's claim: plain tag-4 needs QF≈84-85 (~500-516 KB on BBB) to reach ~38.8
+dB, so AQ is roughly **10% smaller at the same PSNR-Y** — it spends bits
+where the eye looks instead of uniformly. Without rate control the fixed-QF
+size grows (detail-dense footage more so); that is the honest trade-off, and
+`--aq 2` beat `--aq 4` on both size and quality in our measurements.
 
 **Half-pixel motion (tag 6):** the motion search refines the best integer
 vector to half-pel precision (two-stage integer → subpel refine, the standard
@@ -216,7 +218,22 @@ are plain integer motion), so it is never worse: on Big Buck Bunny it is
 **smaller AND sharper** (−3.1% size, +0.72 dB); on the drone the file barely
 moves (+3.5%) while PSNR-Y climbs +0.57 dB. `--no-hpel` restores integer
 motion (tag 5); the library default stays off, so `codec.py` bit-exactness
-holds unless a tool opts in.
+holds unless a tool opts in. `--no-qpel` restores tag 6.
+
+**Quarter-pixel motion (tag 7, the default):** the motion search refines
+through the half-pel ladder to quarter-pel precision, and the decoder
+interpolates the luma reference with H.264's 6-tap half-pel filter
+(`(A-5B+20C+20D-5E+F+16)>>5`) followed by a bilinear quarter-pel step
+(`(A+B+1)>>1`) — identical integer math in Rust and `web/codec.js` (proven by
+`node experiments/check_profile_qpel_vectors.js`, wired into CI). Tag 7 is a
+strict superset of tag 6 (every half-pel vector is representable in
+quarter-pel units), so the search is never worse — but the honest measured
+trade-off at QF=70 is a small win on camera motion at a real size cost: BBB
+stays ≈neutral (−0.02 dB) at +4.6% size, while the drone gains +0.09 dB at
++8.4% size (smooth pans/zooms land on true sub-pixel motion). `--no-qpel`
+restores tag 6; `--qpel-bilinear` swaps the 6-tap for plain bilinear at
+quarter precision (encoder-side experiment, measured ≈+0.05 dB at ≈1% size;
+decoders always implement the 6-tap spec, so streams stay interoperable).
 
 Every `--profile` compile ends with a **quality report** — how far the lossy
 reconstruction drifts from the source, averaged over all frames (mean, min,

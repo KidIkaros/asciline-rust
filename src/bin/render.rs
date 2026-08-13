@@ -22,7 +22,7 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use asciline::codec::{
-    CodecDecoder, MAX_DECOMPRESSED, TAG_PROFILE, TAG_PROFILE_AQ, TAG_PROFILE_HPEL,
+    CodecDecoder, MAX_DECOMPRESSED, TAG_PROFILE, TAG_PROFILE_AQ, TAG_PROFILE_HPEL, TAG_PROFILE_QPEL,
 };
 use asciline::profile::ProfileDecoder;
 use asciline::protocol::{parse_ascf_header, AscfSeekIndex, ASCF_MAGIC_V2};
@@ -195,7 +195,10 @@ fn main() -> Result<()> {
         let frame: Vec<u8> = if header.mode == 1 {
             continue;
         } else if msg.len() >= 5
-            && matches!(msg[4], TAG_PROFILE | TAG_PROFILE_AQ | TAG_PROFILE_HPEL)
+            && matches!(
+                msg[4],
+                TAG_PROFILE | TAG_PROFILE_AQ | TAG_PROFILE_HPEL | TAG_PROFILE_QPEL
+            )
         {
             pdec.decode(&msg)?.1
         } else {

@@ -26,29 +26,36 @@
 //!   keyframe only: [u8 QF][u16 BE cols][u16 BE rows]
 //!     tags 5/6 only: [+ u8 aq_levels]  2 or 4 quant-scale levels
 //!   then 3 planes (Y full, Cb/Cr half), each:
-//!     tags 5/6 luma only: [ceil(nb*bits/8) bytes AQ map, MSB-first bit-packed,
-//!                          bits = log2(aq_levels) per block]
+//!     tags 5/6/7 luma only: [ceil(nb*bits/8) bytes AQ map, MSB-first
+//!                           bit-packed, bits = log2(aq_levels) per block]
 //!     inter only: [ceil(nb/8) bytes skip mask, MSB-first]
 //!     per coded block, raster order:
 //!       luma inter: [i8 dx][i8 dy]     tag 6: half-pel units (2× pel + frac)
+//!                                      tag 7: quarter-pel units (4× pel + frac)
 //!       [u8 n_pairs][ (u8 run)(i16 LE value) × n_pairs ]
 //! ```
 //!
-//! Tags 5/6 differ from tag 4 only in the marked places. Tag 5 (adaptive
+//! Tags 5/6/7 differ from tag 4 only in the marked places. Tag 5 (adaptive
 //! quantization): the keyframe signals how many per-block quant-scale levels
 //! the stream uses, and each luma plane carries the packed map selecting one
-//! of them per block. Tag 6 (half-pixel motion, an opt-in prototype): the tag
-//! itself signals that inter motion vectors are half-pel units and both the
-//! encoder and decoder interpolate the luma reference bilinearly
-//! (`(A+B+1)>>1` / `(A+B+C+D+2)>>2`, integer math, edge-clamped — identical
-//! on both sides, so no floats cross the wire). Even half-pel displacements
-//! are plain integer motion, so tag 6 is a strict superset of tag 5.
+//! of them per block. Tag 6 (half-pixel motion): the tag signals that inter
+//! motion vectors are half-pel units and both the encoder and decoder
+//! interpolate the luma reference bilinearly (`(A+B+1)>>1` /
+//! `(A+B+C+D+2)>>2`, integer math, edge-clamped — identical on both sides,
+//! so no floats cross the wire). Tag 7 (quarter-pixel motion): vectors are
+//! quarter-pel units and the reference is interpolated with H.264's 6-tap
+//! half-pel filter (`(A-5B+20C+20D-5E+F+16)>>5`) followed by a bilinear
+//! quarter-pel step — again identical integer math in Rust and web/codec.js.
+//! Each motion mode is a strict superset of the previous: even half-pel
+//! displacements are plain integer motion, and every half-pel displacement is
+//! representable in quarter-pel units, so the encoder is never worse.
 
+use crate::codec::{
+    zlib_compress, zlib_decompress, TAG_PROFILE, TAG_PROFILE_AQ, TAG_PROFILE_HPEL, TAG_PROFILE_QPEL,
+};
+use crate::quality::{psnr, ssim, QualityStats};
 use anyhow::{bail, Result};
 use rayon::prelude::*;
-
-use crate::codec::{zlib_compress, zlib_decompress, TAG_PROFILE, TAG_PROFILE_AQ, TAG_PROFILE_HPEL};
-use crate::quality::{psnr, ssim, QualityStats};
 
 /// Forced keyframe interval (same as the adaptive codec's).
 const KEY: u32 = 48;
@@ -342,6 +349,19 @@ impl Plane {
     }
 }
 
+/// Motion-compensation precision, signaled by the wire tag (4 = integer,
+/// 6 = half-pel, 7 = quarter-pel). Only the luma plane carries motion
+/// vectors, so only its reference is interpolated.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum McMode {
+    /// Tag 4: integer-pixel motion vectors, no interpolation.
+    Integer,
+    /// Tag 6: half-pel units, bilinear reference interpolation.
+    HalfPel,
+    /// Tag 7: quarter-pel units, H.264 6-tap + bilinear interpolation.
+    QuarterPel,
+}
+
 /// Stateful lossy DCT profile encoder. Frames are `w*h*3` BGR bytes.
 pub struct ProfileEncoder {
     pub w: usize,
@@ -362,12 +382,28 @@ pub struct ProfileEncoder {
     /// (SATD distortion + coefficient-count rate), which trades a little
     /// encode time for fewer bits at the same distortion.
     pub rdo_lambda: f64,
-    /// Half-pixel motion compensation (tag 6, opt-in prototype): the motion
-    /// search refines the best integer vector to half-pel precision and the
-    /// decoder interpolates the luma reference bilinearly. A strict superset
-    /// of integer motion (even half-pel displacements are plain integer
-    /// shifts), so it never hurts — but requires a decoder that knows tag 6.
+    /// Half-pixel motion compensation (tag 6): the motion search refines the
+    /// best integer vector to half-pel precision and the decoder interpolates
+    /// the luma reference bilinearly. A strict superset of integer motion
+    /// (even half-pel displacements are plain integer shifts), so it never
+    /// hurts — but requires a decoder that knows tag 6.
     pub hpel: bool,
+    /// Quarter-pixel motion compensation (tag 7): the motion search refines
+    /// through half-pel to quarter-pel precision and the decoder interpolates
+    /// the luma reference at quarter-pel positions. A strict superset of
+    /// half-pel (every half-pel displacement is representable in quarter-pel
+    /// units), so the search is never worse. When set, wins over `hpel` for
+    /// tag selection. The interpolation filter is `qpel_6tap` (H.264's 6-tap
+    /// half-pel + bilinear quarter-pel); `false` selects plain bilinear at
+    /// quarter precision (the tag-6 filter extended), which rings less on
+    /// low-resolution grids.
+    pub qpel: bool,
+    /// Interpolation filter for quarter-pel motion (tag 7): `true` = H.264's
+    /// 6-tap half-pel filter (`(A-5B+20C+20D-5E+F+16)>>5`); `false` = plain
+    /// bilinear at quarter precision. Both are strict supersets of half-pel
+    /// (the search picks the best vector either way); measured, the 6-tap is
+    /// sharper but can ring on tiny grids — see `--profile` docs.
+    pub qpel_6tap: bool,
     pub level: u32,
     /// Scene-cut detection: mean absolute luma deviation vs the previous
     /// reconstruction above which an inter frame is re-encoded as a keyframe.
@@ -411,7 +447,9 @@ impl ProfileEncoder {
             aq_levels: 0, // off by default: tag 4, bit-exact original behavior
             r_search: DEFAULT_R_SEARCH,
             rdo_lambda: 0.0,
-            hpel: false, // off by default: tag 4/5, bit-exact original behavior
+            hpel: false,     // off by default: tag 4/5, bit-exact original behavior
+            qpel: false,     // off by default (compile tool enables it: tag 7)
+            qpel_6tap: true, // H.264 6-tap by default (the tag-7 spec)
             level,
             scene_cut_mad: 0.0, // disabled by default: bit-exact original behavior
             collect_stats: true,
@@ -530,13 +568,13 @@ impl ProfileEncoder {
         payload.push(ftype);
         if ftype == 0 {
             // keyframe self-describes: [QF][cols u16][rows u16][aq_levels?]
-            // Tag 5 pushes the byte only when AQ is on; tag 6 ALWAYS pushes
+            // Tag 5 pushes the byte only when AQ is on; tags 6/7 ALWAYS push
             // it (0 when off) so the decoder never has to guess whether the
-            // half-pel header carries it.
+            // sub-pel header carries it.
             payload.push(self.qf);
             payload.extend_from_slice(&(w as u16).to_be_bytes());
             payload.extend_from_slice(&(h as u16).to_be_bytes());
-            if aq.0 > 0 || self.hpel {
+            if aq.0 > 0 || self.hpel || self.qpel {
                 payload.push(aq.0);
             }
         }
@@ -556,9 +594,15 @@ impl ProfileEncoder {
             } else {
                 (0, None)
             };
-            // Half-pel motion applies to the luma plane only (the same planes
-            // that carry motion vectors) — chroma stays co-located.
-            let hp = self.hpel && pi == 0;
+            // Sub-pixel motion applies to the luma plane only (the same plane
+            // that carries motion vectors) — chroma stays co-located.
+            let mc = if pi == 0 && self.qpel {
+                McMode::QuarterPel
+            } else if pi == 0 && self.hpel {
+                McMode::HalfPel
+            } else {
+                McMode::Integer
+            };
             let (body, rec) = enc_plane(
                 &planes[pi],
                 prev_plane,
@@ -566,7 +610,8 @@ impl ProfileEncoder {
                 ph,
                 ftype,
                 pi == 0,
-                hp,
+                mc,
+                self.qpel_6tap,
                 qm,
                 self.dz,
                 self.skip_t,
@@ -582,10 +627,14 @@ impl ProfileEncoder {
         let z = zlib_compress(&payload, self.level);
         let mut msg = Vec::with_capacity(5 + z.len());
         msg.extend_from_slice(&self.n.to_be_bytes());
-        // Tag 6 (half-pel) subsumes tag 5 (its keyframe header layout is
-        // identical, including the optional aq_levels byte); when both hpel
-        // and AQ are off we emit the plain tag 4 for full compat.
-        msg.push(if self.hpel {
+        // Tags 6/7 (sub-pel motion) subsume tag 5 (their keyframe header
+        // layout is identical, including the always-present aq_levels byte);
+        // when none are on we emit tag 5 (AQ) or the plain tag 4 for full
+        // compat. qpel wins over hpel when both are set (a strict superset —
+        // quarter-pel units represent every half-pel vector).
+        msg.push(if self.qpel {
+            TAG_PROFILE_QPEL
+        } else if self.hpel {
             TAG_PROFILE_HPEL
         } else if aq.0 > 0 {
             TAG_PROFILE_AQ
@@ -676,8 +725,8 @@ struct BlockEnc {
     rec: [[u8; 8]; 8],
 }
 
-/// Prediction block for a candidate motion vector: the edge-clamped previous
-/// frame shifted by (dx, dy) — integer, or half-pel bilinear when `hpel` — or
+/// Prediction block for a candidate motion vector: the reference sampled at
+/// (dx, dy) with the stream's motion-compensation precision (`mc_sample`), or
 /// a flat 128 predictor on keyframes / no-MV planes. Identical math to the
 /// inline decoder version (and codec.js).
 #[inline]
@@ -690,7 +739,8 @@ fn build_pred(
     bx: usize,
     ftype: u8,
     use_mv: bool,
-    hpel: bool,
+    mc: McMode,
+    qpel_6tap: bool,
     mvx: i32,
     mvy: i32,
 ) -> [[f64; 8]; 8] {
@@ -706,15 +756,17 @@ fn build_pred(
         for y in 0..8 {
             for x in 0..8 {
                 let v = if use_mv {
-                    if hpel {
-                        hpel_sample(prev_buf, w, h, bx * 8 + x, by * 8 + y, mvx, mvy)
-                    } else {
-                        let w32 = w as i32;
-                        let h32 = h as i32;
-                        let sx = ((bx * 8 + x) as i32 + mvx).clamp(0, w32 - 1) as usize;
-                        let sy = ((by * 8 + y) as i32 + mvy).clamp(0, h32 - 1) as usize;
-                        prev_buf[sy * w + sx]
-                    }
+                    mc_sample(
+                        mc,
+                        qpel_6tap,
+                        prev_buf,
+                        w,
+                        h,
+                        bx * 8 + x,
+                        by * 8 + y,
+                        mvx,
+                        mvy,
+                    )
                 } else {
                     prev_buf[(by * 8 + y) * w + bx * 8 + x]
                 };
@@ -723,6 +775,163 @@ fn build_pred(
         }
     }
     pred
+}
+
+/// H.264 6-tap half-pel filter: `clip((A-5B+20C+20D-5E+F+16)>>5, 0, 255)`,
+/// where the six input taps are edge-clamped to the plane (like the bilinear
+/// sampler — real grids are padded to multiples of 16, so taps are rarely at
+/// the boundary). The 32-bit accumulation cannot overflow for byte inputs
+/// (max |sum| ≈ 8×255). Identical integer math in Rust and web/codec.js.
+#[inline]
+fn h264_6tap(prev: &[u8], w: usize, h: usize, x: usize, y: usize) -> i32 {
+    let w32 = w as i32;
+    let h32 = h as i32;
+    let yc = (y as i32).clamp(0, h32 - 1) as usize;
+    let tap = |d: i32| {
+        let xc = ((x as i32) + d).clamp(0, w32 - 1) as usize;
+        prev[yc * w + xc] as i32
+    };
+    let a = tap(-2);
+    let b = tap(-1);
+    let c = tap(0);
+    let d = tap(1);
+    let e = tap(2);
+    let f = tap(3);
+    ((a - 5 * b + 20 * c + 20 * d - 5 * e + f + 16) >> 5).clamp(0, 255)
+}
+
+/// Quarter-pel sample of `prev` at output pixel (px, py) shifted by the
+/// quarter-pel displacement (qdx, qdy), H.264-style: the integer part is
+/// `qdx>>2` (arithmetic shift = floor for negatives), the fractional bits are
+/// `qdx&3`. The sample sits at fractional offset (fx/4, fy/4) from integer
+/// pixel (ix, iy):
+/// ```text
+/// fx = 0: integer pixel A
+/// fx = 2: half-pel between A and its right neighbor (6-tap or bilinear)
+/// fx = 1: (A + half(A) + 1)>>1      — quarter between A and the half-pel
+/// fx = 3: (half(A) + B + 1)>>1      — quarter between the half-pel and B
+/// ```
+/// where `half(A)` is the half-pel interpolation at A (H.264's 6-tap filter
+/// when `qpel_6tap`, plain bilinear otherwise — the tag-6 filter extended to
+/// quarter precision, which rings less on tiny grids) and `B` = A's right
+/// neighbor, clamped at the plane edge. The vertical step is symmetric (fy),
+/// using the half-pel column for fy=2 and the adjacent integer row for
+/// fy=1/3. All rounding is `(a+b+1)>>1` (the same as the tag-6 bilinear);
+/// identical integer math on the encoder and decoder sides (and in codec.js).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn qpel_sample(
+    prev: &[u8],
+    w: usize,
+    h: usize,
+    px: usize,
+    py: usize,
+    qdx: i32,
+    qdy: i32,
+    qpel_6tap: bool,
+) -> u8 {
+    let w32 = w as i32;
+    let h32 = h as i32;
+    let ix = ((px as i32) + (qdx >> 2)).clamp(0, w32 - 1) as usize;
+    let iy = ((py as i32) + (qdy >> 2)).clamp(0, h32 - 1) as usize;
+    let fx = qdx & 3;
+    let fy = qdy & 3;
+    // Horizontal interpolation of any row `yr` at fractional x: integer
+    // (fx=0), half-pel (fx=2; H.264 6-tap when qpel_6tap, bilinear
+    // otherwise), or bilinear quarter between the integer pixel (x for fx=1,
+    // x+1 for fx=3) and the half-pel filter at x.
+    let hx = |x: usize, yr: usize, fx: i32| -> i32 {
+        match fx {
+            0 => prev[yr * w + x] as i32,
+            2 => {
+                if qpel_6tap {
+                    h264_6tap(prev, w, h, x, yr)
+                } else {
+                    let x1 = ((x as i32) + 1).min(w32 - 1) as usize;
+                    (prev[yr * w + x] as i32 + prev[yr * w + x1] as i32 + 1) >> 1
+                }
+            }
+            _ => {
+                let half = if qpel_6tap {
+                    h264_6tap(prev, w, h, x, yr)
+                } else {
+                    let x1 = ((x as i32) + 1).min(w32 - 1) as usize;
+                    (prev[yr * w + x] as i32 + prev[yr * w + x1] as i32 + 1) >> 1
+                };
+                let int = if fx == 1 {
+                    prev[yr * w + x] as i32
+                } else {
+                    let x1 = ((x as i32) + 1).min(w32 - 1) as usize;
+                    prev[yr * w + x1] as i32
+                };
+                (int + half + 1) >> 1
+            }
+        }
+    };
+    // Half-pel interpolation of the whole column at fractional x: each of the
+    // six tap rows is horizontally interpolated at fx, then the 6-tap runs
+    // vertically over those values (H.264's separable filter).
+    let col_half = |y: usize| -> i32 {
+        let y0 = ((y as i32) - 2).clamp(0, h32 - 1) as usize;
+        let y1 = ((y as i32) - 1).clamp(0, h32 - 1) as usize;
+        let y3 = (y + 1).min(h - 1);
+        let y4 = ((y as i32) + 2).clamp(0, h32 - 1) as usize;
+        let y5 = ((y as i32) + 3).clamp(0, h32 - 1) as usize;
+        let c0 = hx(ix, y0, fx);
+        let c1 = hx(ix, y1, fx);
+        let c2 = hx(ix, y, fx);
+        let c3 = hx(ix, y3, fx);
+        let c4 = hx(ix, y4, fx);
+        let c5 = hx(ix, y5, fx);
+        ((c0 - 5 * c1 + 20 * c2 + 20 * c3 - 5 * c4 + c5 + 16) >> 5).clamp(0, 255)
+    };
+    // Final vertical step at fractional y: integer/half-pel column for
+    // fy=0/2, bilinear quarter between the half-pel column and the adjacent
+    // integer row (iy for fy=1, iy+1 for fy=3).
+    let v = match fy {
+        0 => hx(ix, iy, fx),
+        2 => col_half(iy),
+        _ => {
+            let half = col_half(iy);
+            let int = if fy == 1 {
+                hx(ix, iy, fx)
+            } else {
+                let y1 = ((iy as i32) + 1).min(h32 - 1) as usize;
+                hx(ix, y1, fx)
+            };
+            (int + half + 1) >> 1
+        }
+    };
+    v.clamp(0, 255) as u8
+}
+
+/// Sample the reference plane with the stream's motion-compensation precision
+/// (see `McMode`). The single dispatch point shared by the encoder's motion
+/// search, `build_pred` and the decoder, so all three agree by construction.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn mc_sample(
+    mode: McMode,
+    qpel_6tap: bool,
+    prev: &[u8],
+    w: usize,
+    h: usize,
+    px: usize,
+    py: usize,
+    dx: i32,
+    dy: i32,
+) -> u8 {
+    match mode {
+        McMode::Integer => {
+            let w32 = w as i32;
+            let h32 = h as i32;
+            let sx = ((px as i32) + dx).clamp(0, w32 - 1) as usize;
+            let sy = ((py as i32) + dy).clamp(0, h32 - 1) as usize;
+            prev[sy * w + sx]
+        }
+        McMode::HalfPel => hpel_sample(prev, w, h, px, py, dx, dy),
+        McMode::QuarterPel => qpel_sample(prev, w, h, px, py, dx, dy, qpel_6tap),
+    }
 }
 
 /// Half-pel bilinear sample of `prev` at output pixel (px, py) shifted by the
@@ -763,24 +972,28 @@ fn hpel_sample(prev: &[u8], w: usize, h: usize, px: usize, py: usize, hdx: i32, 
     v.clamp(0, 255) as u8
 }
 
-/// SAD of one 8×8 block against the half-pel-shifted reference (tag 6).
+/// SAD of one 8×8 block against the reference shifted by (dx, dy), sampled
+/// with the stream's motion-compensation precision (integer, half-pel
+/// bilinear, or quarter-pel 6-tap).
 #[inline]
 #[allow(clippy::too_many_arguments)]
-fn block_sad_hpel(
+fn block_sad_mc(
     cur: &[u8],
     prev: &[u8],
     w: usize,
     h: usize,
     by: usize,
     bx: usize,
-    hdx: i32,
-    hdy: i32,
+    mc: McMode,
+    qpel_6tap: bool,
+    dx: i32,
+    dy: i32,
 ) -> i32 {
     let mut sad = 0i32;
     for y in 0..8usize {
         for x in 0..8usize {
             let cv = cur[(by * 8 + y) * w + bx * 8 + x] as i32;
-            let pv = hpel_sample(prev, w, h, bx * 8 + x, by * 8 + y, hdx, hdy) as i32;
+            let pv = mc_sample(mc, qpel_6tap, prev, w, h, bx * 8 + x, by * 8 + y, dx, dy) as i32;
             sad += (cv - pv).abs();
         }
     }
@@ -805,17 +1018,76 @@ fn refine_hpel(
     my: i32,
 ) -> (i32, i32) {
     let mut best = (2 * mx, 2 * my);
-    let mut best_sad = block_sad_hpel(cur, prev, w, h, by, bx, best.0, best.1);
+    let mut best_sad = block_sad_mc(
+        cur,
+        prev,
+        w,
+        h,
+        by,
+        bx,
+        McMode::HalfPel,
+        true,
+        best.0,
+        best.1,
+    );
     for fy in -HPEL_REFINE..=HPEL_REFINE {
         for fx in -HPEL_REFINE..=HPEL_REFINE {
             if fx == 0 && fy == 0 {
                 continue;
             }
             let (hdx, hdy) = (2 * mx + fx, 2 * my + fy);
-            let s = block_sad_hpel(cur, prev, w, h, by, bx, hdx, hdy);
+            let s = block_sad_mc(cur, prev, w, h, by, bx, McMode::HalfPel, true, hdx, hdy);
             if s < best_sad {
                 best_sad = s;
                 best = (hdx, hdy);
+            }
+        }
+    }
+    best
+}
+
+/// Refine the best half-pel motion vector (hx, hy), in half-pel units, to
+/// quarter-pel precision: scale it to quarter-pel units (2hx+fx, 2hy+fy) and
+/// score the 9 surrounding quarter-pel displacements by interpolated SAD,
+/// returning the best in quarter-pel units. The half-pel displacement itself
+/// is included, so refinement never picks a worse vector than half-pel search
+/// did — and because quarter-pel positions are denser, it is a strict
+/// superset (tag 7 is never worse than tag 6).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn refine_qpel(
+    cur: &[u8],
+    prev: &[u8],
+    w: usize,
+    h: usize,
+    by: usize,
+    bx: usize,
+    hx: i32,
+    hy: i32,
+) -> (i32, i32) {
+    let mut best = (2 * hx, 2 * hy);
+    let mut best_sad = block_sad_mc(
+        cur,
+        prev,
+        w,
+        h,
+        by,
+        bx,
+        McMode::QuarterPel,
+        true,
+        best.0,
+        best.1,
+    );
+    for fy in -HPEL_REFINE..=HPEL_REFINE {
+        for fx in -HPEL_REFINE..=HPEL_REFINE {
+            if fx == 0 && fy == 0 {
+                continue;
+            }
+            let (qdx, qdy) = (2 * hx + fx, 2 * hy + fy);
+            let s = block_sad_mc(cur, prev, w, h, by, bx, McMode::QuarterPel, true, qdx, qdy);
+            if s < best_sad {
+                best_sad = s;
+                best = (qdx, qdy);
             }
         }
     }
@@ -947,7 +1219,8 @@ fn enc_block(
     bx: usize,
     ftype: u8,
     use_mv: bool,
-    hpel: bool,
+    mc: McMode,
+    qpel_6tap: bool,
     qm: &[i64; 64],
     dz: f64,
     skip_t: f64,
@@ -978,10 +1251,13 @@ fn enc_block(
     // preferred on ties. When RDO is enabled, rank every candidate by SAD
     // first, keep the lowest K, then refine with a full DCT + quantize +
     // rate cost so the vector minimizes distortion + λ·bits, not just SAD.
-    // Tag 6 (half-pel) refines the integer winner(s) to half-pel precision
-    // with the interpolated SAD, so smooth motion lands on the true minimum.
+    // Sub-pixel motion (tags 6/7) refines the integer winner(s) through the
+    // half-pel (then quarter-pel) ladder with the interpolated SAD, so smooth
+    // motion lands on the true minimum; the ladder includes the previous
+    // stage's winner, so refinement never picks a worse vector.
     let mut mvx: i32 = 0;
     let mut mvy: i32 = 0;
+    let subpel = matches!(mc, McMode::HalfPel | McMode::QuarterPel);
     if ftype == 1 && use_mv {
         let prev_buf = &prev.as_ref().unwrap().buf;
         if rdo_lambda > 0.0 {
@@ -995,18 +1271,25 @@ fn enc_block(
             }
             cands.sort_by_key(|&(_, _, s)| s);
             cands.truncate(RDO_K);
-            // Half-pel: expand each integer candidate by its refined neighbor
-            // so the RD cost sees sub-pixel vectors too.
-            if hpel {
+            // Sub-pel: expand each integer candidate through the refinement
+            // ladder so the RD cost sees sub-pixel vectors too.
+            if subpel {
                 let refined: Vec<(i32, i32)> = cands
                     .iter()
-                    .map(|&(dx, dy, _)| refine_hpel(cur, prev_buf, w, h, by, bx, dx, dy))
+                    .map(|&(dx, dy, _)| {
+                        let (hdx, hdy) = refine_hpel(cur, prev_buf, w, h, by, bx, dx, dy);
+                        if mc == McMode::QuarterPel {
+                            refine_qpel(cur, prev_buf, w, h, by, bx, hdx, hdy)
+                        } else {
+                            (hdx, hdy)
+                        }
+                    })
                     .collect();
-                cands.extend(refined.into_iter().map(|(hdx, hdy)| (hdx, hdy, 0)));
+                cands.extend(refined.into_iter().map(|(dx, dy)| (dx, dy, 0)));
             }
             let mut best_cost = f64::INFINITY;
             for (dx, dy, _) in cands {
-                let pred = build_pred(prev, w, h, by, bx, ftype, use_mv, hpel, dx, dy);
+                let pred = build_pred(prev, w, h, by, bx, ftype, use_mv, mc, qpel_6tap, dx, dy);
                 let (_, _, nnz) = dct_quant(&cur_b, &pred, qm_ref, dz, f);
                 // SATD distortion + rate: 1 (n_pairs) + 3 × nnz (run + 2-byte
                 // value per pair); the MV bytes are constant across candidates.
@@ -1033,19 +1316,25 @@ fn enc_block(
                     }
                 }
             }
-            if hpel {
+            if subpel {
                 let (hdx, hdy) = refine_hpel(cur, prev_buf, w, h, by, bx, mvx, mvy);
-                mvx = hdx;
-                mvy = hdy;
+                if mc == McMode::QuarterPel {
+                    let (qdx, qdy) = refine_qpel(cur, prev_buf, w, h, by, bx, hdx, hdy);
+                    mvx = qdx;
+                    mvy = qdy;
+                } else {
+                    mvx = hdx;
+                    mvy = hdy;
+                }
             }
         }
     }
 
     // predict + residual + DCT + dead-zone quantize (shared with the RDO path)
-    let pred = build_pred(prev, w, h, by, bx, ftype, use_mv, hpel, mvx, mvy);
+    let pred = build_pred(prev, w, h, by, bx, ftype, use_mv, mc, qpel_6tap, mvx, mvy);
     let (sse, cq, nnz) = dct_quant(&cur_b, &pred, qm_ref, dz, f);
 
-    // skip decision (inter only). Tag 6 MVs are half-pel units, but the zero
+    // skip decision (inter only). Sub-pel MVs are scaled units, but the zero
     // vector is still exactly (0,0) — identical skip semantics.
     let is_skip =
         ftype == 1 && mvx == 0 && mvy == 0 && (nnz == 0 || (skip_t > 0.0 && sse < skip_t));
@@ -1102,7 +1391,8 @@ fn enc_plane(
     h: usize,
     ftype: u8,
     use_mv: bool,
-    hpel: bool,
+    mc: McMode,
+    qpel_6tap: bool,
     qm: &[i64; 64],
     dz: f64,
     skip_t: f64,
@@ -1131,7 +1421,7 @@ fn enc_plane(
             let bx = bi % nbx;
             let aq_num = if aq_levels > 0 { nums[bi] } else { 4 };
             enc_block(
-                cur, prev, w, h, by, bx, ftype, use_mv, hpel, qm, dz, skip_t, f, r_search,
+                cur, prev, w, h, by, bx, ftype, use_mv, mc, qpel_6tap, qm, dz, skip_t, f, r_search,
                 rdo_lambda, aq_num,
             )
         })
@@ -1248,11 +1538,15 @@ pub struct ProfileDecoder {
     qc: Option<[i64; 64]>,
     cur: Option<[Plane; 3]>,
     spare: Option<[Plane; 3]>,
-    /// AQ levels signaled by the last tag-5/6 keyframe (0 = tag-4 stream).
+    /// AQ levels signaled by the last tag-5/6/7 keyframe (0 = tag-4 stream).
     aq_levels: u8,
-    /// Half-pel motion signaled by the last tag-6 keyframe (inter MVs are
-    /// half-pel units and the luma reference is interpolated bilinearly).
-    hpel: bool,
+    /// Motion-compensation precision signaled by the last keyframe's tag
+    /// (tag 4 = integer, tag 6 = half-pel, tag 7 = quarter-pel).
+    mc: McMode,
+    /// Quarter-pel interpolation filter for tag 7 (the wire tag does not
+    /// carry it — decoders implement the 6-tap filter, the tag-7 spec; the
+    /// encoder-side bilinear experiment only changes the ENCODER's search).
+    qpel_6tap: bool,
 }
 
 impl ProfileDecoder {
@@ -1263,7 +1557,8 @@ impl ProfileDecoder {
             cur: None,
             spare: None,
             aq_levels: 0,
-            hpel: false,
+            mc: McMode::Integer,
+            qpel_6tap: true, // decoders implement the tag-7 spec (6-tap)
         }
     }
 
@@ -1273,7 +1568,8 @@ impl ProfileDecoder {
         self.cur = None;
         self.spare = None;
         self.aq_levels = 0;
-        self.hpel = false;
+        self.mc = McMode::Integer;
+        self.qpel_6tap = true;
     }
 
     /// Decode one wire message → `(frame_index, full BGR frame)`.
@@ -1313,32 +1609,38 @@ impl ProfileDecoder {
             {
                 bail!("profile grid {w}x{h} out of bounds");
             }
-            // Tags 5/6 keyframes carry one extra header byte: the AQ level
-            // count. Tag 5 pushes it only when AQ is on (2|4); tag 6 always
-            // carries it (0 = AQ off) so parsing is unambiguous.
-            self.aq_levels = if tag == TAG_PROFILE_AQ || tag == TAG_PROFILE_HPEL {
-                if payload.len() < 7 {
-                    bail!("profile AQ keyframe truncated");
-                }
-                let lv = payload[6];
-                // Only the levels the encoder can emit are accepted: tag 5
-                // carries 2|4, tag 6 additionally carries 0 (AQ off). Anything
-                // else (e.g. 1, which would make log2(levels) = 0 and divide
-                // by zero in the map unpacker) is a clean bail, not a panic.
-                if tag == TAG_PROFILE_HPEL {
-                    if lv != 0 && lv != 2 && lv != 4 {
+            // Tags 5/6/7 keyframes carry one extra header byte: the AQ level
+            // count. Tag 5 pushes it only when AQ is on (2|4); tags 6/7 always
+            // carry it (0 = AQ off) so parsing is unambiguous.
+            self.aq_levels =
+                if tag == TAG_PROFILE_AQ || tag == TAG_PROFILE_HPEL || tag == TAG_PROFILE_QPEL {
+                    if payload.len() < 7 {
+                        bail!("profile AQ keyframe truncated");
+                    }
+                    let lv = payload[6];
+                    // Only the levels the encoder can emit are accepted: tag 5
+                    // carries 2|4, tags 6/7 additionally carry 0 (AQ off).
+                    // Anything else (e.g. 1, which would make log2(levels) = 0
+                    // and divide by zero in the map unpacker) is a clean bail,
+                    // not a panic.
+                    if tag == TAG_PROFILE_AQ {
+                        if lv != 2 && lv != 4 {
+                            bail!("profile AQ levels {lv} out of bounds (2 or 4)");
+                        }
+                    } else if lv != 0 && lv != 2 && lv != 4 {
                         bail!("profile AQ levels {lv} out of bounds (0, 2 or 4)");
                     }
-                } else if lv != 2 && lv != 4 {
-                    bail!("profile AQ levels {lv} out of bounds (2 or 4)");
-                }
-                off = 7;
-                lv
-            } else {
-                off = 6;
-                0
+                    off = 7;
+                    lv
+                } else {
+                    off = 6;
+                    0
+                };
+            self.mc = match tag {
+                TAG_PROFILE_QPEL => McMode::QuarterPel,
+                TAG_PROFILE_HPEL => McMode::HalfPel,
+                _ => McMode::Integer,
             };
-            self.hpel = tag == TAG_PROFILE_HPEL;
             let (ql, qc) = qtables(qf);
             self.ql = Some(ql);
             self.qc = Some(qc);
@@ -1364,13 +1666,14 @@ impl ProfileDecoder {
             spare[i].buf.copy_from_slice(&cur[i].buf);
         }
         // AQ applies to the luma plane only; chroma always uses the base
-        // tables. Half-pel motion likewise applies to the luma plane only
+        // tables. Sub-pixel motion likewise applies to the luma plane only
         // (the plane that carries motion vectors).
-        let frame_aq = if tag == TAG_PROFILE_AQ || tag == TAG_PROFILE_HPEL {
-            self.aq_levels
-        } else {
-            0
-        };
+        let frame_aq =
+            if tag == TAG_PROFILE_AQ || tag == TAG_PROFILE_HPEL || tag == TAG_PROFILE_QPEL {
+                self.aq_levels
+            } else {
+                0
+            };
         for pi in 0..3usize {
             let qm = if pi == 0 {
                 self.ql.as_ref().unwrap()
@@ -1385,7 +1688,8 @@ impl ProfileDecoder {
                 &mut spare[pi],
                 ftype,
                 pi == 0,
-                pi == 0 && self.hpel,
+                if pi == 0 { self.mc } else { McMode::Integer },
+                self.qpel_6tap,
                 qm,
                 aq,
             )?;
@@ -1413,7 +1717,8 @@ fn dec_plane(
     out: &mut Plane,
     ftype: u8,
     use_mv: bool,
-    hpel: bool,
+    mc: McMode,
+    qpel_6tap: bool,
     qm: &[i64; 64],
     aq_levels: u8,
 ) -> Result<usize> {
@@ -1517,8 +1822,6 @@ fn dec_plane(
             z[0] += dc_pred;
             dc_pred = z[0];
 
-            let w32 = w as i32;
-            let h32 = h as i32;
             if last_nz <= 0 {
                 // DC-only block: IDCT collapses to a flat value
                 let flat = (529 * (z[0] * qm_ref[0]) + 2048).div_euclid(4096);
@@ -1526,12 +1829,20 @@ fn dec_plane(
                     for x in 0..8 {
                         let pred = if ftype == 0 {
                             128
-                        } else if use_mv && hpel {
-                            hpel_sample(&cur.buf, w, h, bx * 8 + x, by * 8 + y, dx, dy) as i64
+                        } else if use_mv {
+                            mc_sample(
+                                mc,
+                                qpel_6tap,
+                                &cur.buf,
+                                w,
+                                h,
+                                bx * 8 + x,
+                                by * 8 + y,
+                                dx,
+                                dy,
+                            ) as i64
                         } else {
-                            let sx = ((bx * 8 + x) as i32 + dx).clamp(0, w32 - 1) as usize;
-                            let sy = ((by * 8 + y) as i32 + dy).clamp(0, h32 - 1) as usize;
-                            cur.buf[sy * w + sx] as i64
+                            cur.buf[(by * 8 + y) * w + bx * 8 + x] as i64
                         };
                         out.buf[(by * 8 + y) * w + bx * 8 + x] = (pred + flat).clamp(0, 255) as u8;
                     }
@@ -1552,12 +1863,20 @@ fn dec_plane(
                     for x in 0..8 {
                         let pred = if ftype == 0 {
                             128
-                        } else if use_mv && hpel {
-                            hpel_sample(&cur.buf, w, h, bx * 8 + x, by * 8 + y, dx, dy) as i64
+                        } else if use_mv {
+                            mc_sample(
+                                mc,
+                                qpel_6tap,
+                                &cur.buf,
+                                w,
+                                h,
+                                bx * 8 + x,
+                                by * 8 + y,
+                                dx,
+                                dy,
+                            ) as i64
                         } else {
-                            let sx = ((bx * 8 + x) as i32 + dx).clamp(0, w32 - 1) as usize;
-                            let sy = ((by * 8 + y) as i32 + dy).clamp(0, h32 - 1) as usize;
-                            cur.buf[sy * w + sx] as i64
+                            cur.buf[(by * 8 + y) * w + bx * 8 + x] as i64
                         };
                         out.buf[(by * 8 + y) * w + bx * 8 + x] =
                             (pred + idct[y][x]).clamp(0, 255) as u8;
@@ -1717,6 +2036,77 @@ mod tests {
                 assert_eq!(
                     out, shown,
                     "hpel aq={aq} frame {i}: decoder must reproduce shown frame"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn qpel_roundtrip_with_and_without_aq() {
+        // Tag-7 quarter-pel streams must round-trip through OUR decoder for
+        // both plain and AQ-combined modes, across keyframes, inter frames,
+        // skips and forced scene cuts — the encoder and decoder must run the
+        // H.264 6-tap + bilinear quarter-pel interpolation with identical
+        // integer math.
+        for qpel_aq in [(true, 0u8), (true, 2u8), (true, 4u8)] {
+            let (qpel, aq) = qpel_aq;
+            let (w, h) = (48usize, 32usize);
+            let mut enc = ProfileEncoder::new(w, h, 70);
+            enc.qpel = qpel;
+            enc.aq_levels = aq;
+            enc.scene_cut_mad = 20.0;
+            let mut dec = ProfileDecoder::new();
+            let mut frames: Vec<Vec<u8>> = (0..10u32).map(|i| synth_bgr(w, h, i, 42)).collect();
+            frames.push(ramp_bgr(w, h, 9)); // hard scene change → forced keyframe
+            for (i, f) in frames.iter().enumerate() {
+                let (msg, shown) = enc.encode(f);
+                assert_eq!(
+                    msg[4], TAG_PROFILE_QPEL,
+                    "qpel encoder must emit tag 7 (aq={aq}, frame {i})"
+                );
+                let (idx, out) = dec
+                    .decode(&msg)
+                    .unwrap_or_else(|e| panic!("qpel aq={aq} frame {i}: {e}"));
+                assert_eq!(idx, i as u32);
+                assert_eq!(
+                    out, shown,
+                    "qpel aq={aq} frame {i}: decoder must reproduce shown frame"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn qpel_emits_tag7_and_keeps_keyframe_layout() {
+        // `qpel = false` keeps tags 4/5/6 byte-identical (the compat contract;
+        // also pinned by the fuzz corpus and the aq_off/hpel_off tests). With
+        // `qpel = true` the tag is 7, and the KEYFRAME wire layout is
+        // identical to tag 6 (header + always-present AQ byte) — only
+        // inter-frame payloads differ (that is the point of quarter-pel:
+        // different MVs and residuals).
+        let (w, h) = (48usize, 32usize);
+        let frames: Vec<Vec<u8>> = (0..50u32).map(|i| synth_bgr(w, h, i, 42)).collect();
+
+        let mut enc_hp = ProfileEncoder::new(w, h, 70);
+        enc_hp.hpel = true;
+        let mut enc_qp = ProfileEncoder::new(w, h, 70);
+        enc_qp.qpel = true;
+        for (i, f) in frames.iter().enumerate() {
+            let m_hp = enc_hp.encode(f).0;
+            let m_qp = enc_qp.encode(f).0;
+            assert_eq!(
+                m_qp[4], TAG_PROFILE_QPEL,
+                "qpel must emit tag 7 (frame {i})"
+            );
+            if i % 48 == 0 {
+                // keyframes: the tag-7 body is byte-identical to the tag-6
+                // body (same header layout, same AQ byte, same planes) — the
+                // tag alone signals the sub-pel precision.
+                let qp_body = zlib_decompress(&m_qp[5..]).unwrap();
+                let hp_body = zlib_decompress(&m_hp[5..]).unwrap();
+                assert_eq!(
+                    qp_body, hp_body,
+                    "tag-7 keyframe must be byte-identical to tag-6 (frame {i})"
                 );
             }
         }

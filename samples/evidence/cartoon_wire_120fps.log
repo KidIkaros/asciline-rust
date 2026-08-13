@@ -4,7 +4,7 @@ frames in 3.0s: 352 → 117.3 fps
 
 == asciline-render --live — wire capture ==
 live INIT: fps=120 mode=6 grid=240x135 pixel=true -> 480x270
-live capture: 480 frames in 4.08s -> 117.5 fps (480x270 per frame)
+live capture: 480 frames in 4.06s -> 118.2 fps (480x270 per frame)
 
 Source content frames: 240 at 60 fps
 Server target: 120 fps; wire capture is transport throughput, not 120 unique source frames.

@@ -8,23 +8,33 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
 
 ### Added
 
-- **Half-pixel motion compensation (tag 6)** for the lossy DCT profile — now
-  the **default** for `asciline-compile --profile` (`--no-hpel` restores tag
-  5, `--no-hpel --aq 0` the tag-4 bit-exact stream): the motion search
-  refines the best integer vector(s) to half-pel precision with the
-  interpolated SAD (two-stage integer→subpel refine), and both decoders
-  interpolate the luma reference bilinearly with identical integer math
-  (`(A+B+1)>>1` / `(A+B+C+D+2)>>2`, edge-clamped). Tag-6 keyframes always
-  carry the `aq_levels` byte (0 = AQ off), so AQ composes with half-pel. New
-  differential check `node experiments/check_profile_hpel_vectors.js` (wired
-  into CI) proves `web/codec.js` reproduces the Rust encoder's tag-6
-  reconstruction byte-for-byte (95 frames). Measured at QF=70/cols=240: Big
-  Buck Bunny 466 KB @ 38.82 dB → **451 KB @ 39.54 dB** (−3.1% size AND
-  +0.72 dB, +0.006 SSIM); drone 403 KB @ 39.72 → 417 KB @ 40.29 (+0.57 dB at
-  +3.5% size). A strict superset of integer motion (even half-pel
-  displacements are plain integer vectors), so it is never worse. The
-  published sample evidence was regenerated with the new default (BBB matrix
-  39.54 dB, drone 40.29 dB); the fuzz corpus generator pins
+- **Half-pixel motion compensation (tag 6)** for the lossy DCT profile —
+  superseded as the default by tag 7 (quarter-pel) in the same release, still
+  selectable with `--no-qpel`: the motion search refines the best integer
+  vector(s) to half-pel precision with the interpolated SAD, and both
+  decoders interpolate the luma reference bilinearly with identical integer
+  math (`(A+B+1)>>1` / `(A+B+C+D+2)>>2`, edge-clamped). Measured at
+  QF=70/cols=240: Big Buck Bunny **451 KB @ 39.54 dB** (vs tag-4's 466 KB @
+  38.82 dB — −3.1% size AND +0.72 dB); drone 417 KB @ 40.29 dB (+0.57 dB at
+  +3.5% size). A strict superset of integer motion.
+- **Quarter-pixel motion compensation (tag 7, H.264-style)** — now the
+  **default** for `asciline-compile --profile` (`--no-qpel` restores tag 6,
+  `--no-hpel` tags 5/4): the motion search refines through the half-pel
+  ladder to quarter-pel precision, and both decoders interpolate the luma
+  reference with H.264's 6-tap half-pel filter
+  (`(A-5B+20C+20D-5E+F+16)>>5`) + bilinear quarter-pel step (`(A+B+1)>>1`),
+  identical integer math in Rust and `web/codec.js` (bit-exact: new
+  differential check `node experiments/check_profile_qpel_vectors.js`, wired
+  into CI, reproduces the Rust encoder's tag-7 reconstruction byte-for-byte
+  — 95 frames). Tag-7 keyframes always carry the `aq_levels` byte (0 = AQ
+  off), so AQ and scene-cut keyframes compose. Honest measured trade-off at
+  QF=70/cols=240 vs tag 6: BBB 451 KB @ 39.54 dB → 472 KB @ **39.52 dB**
+  (≈neutral, +4.6% size); drone 417 KB @ 40.29 → 467 KB @ **40.37 dB**
+  (+0.08 dB at +12% size) — a small quality win on camera motion at a real
+  size cost, unlike AQ/half-pel which were unambiguous wins. `--qpel-bilinear`
+  swaps the 6-tap for plain bilinear at quarter precision (encoder-side
+  only; decoders always implement the 6-tap spec — measured marginally
+  better, ≈0.05 dB, at ≈1% size). The fuzz corpus generator pins
   `--no-hpel --aq 0` (drift 0).
 - **Seek index for `.ascf` files** (no wire change): `asciline-player
   --seek SECS` and `asciline-render --seek SECS` (and `--frame N` now jumps

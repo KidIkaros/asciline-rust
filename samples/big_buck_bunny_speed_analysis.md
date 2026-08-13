@@ -4,10 +4,10 @@ Same source: 240 frames at 30 fps, 240 columns. Compile FPS is frames processed 
 
 | Format | Display FPS | Frames | Wall time | Compile FPS | Output bytes | PSNR-Y | SSIM-Y |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| ASCII mode | 30 | 240 | 1.11 s | 216.2 | 2620569 | — | — |
-| PIXEL lossless | 30 | 240 | 2.08 s | 115.4 | 9779783 | — | — |
-| PROFILE QF=70 | 30 | 240 | 1.71 s | 140.4 | 451574 | 39.54 | 0.9827 |
-| PROFILE QF=70 (no quality report) | 30 | 240 | 1.28 s | 187.5 | 451574 | — | — |
+| ASCII mode | 30 | 240 | 1.13 s | 212.4 | 2620569 | — | — |
+| PIXEL lossless | 30 | 240 | 2.17 s | 110.6 | 9779783 | — | — |
+| PROFILE QF=70 | 30 | 240 | 2.63 s | 91.3 | 472221 | 39.52 | 0.9816 |
+| PROFILE QF=70 (no quality report) | 30 | 240 | 2.20 s | 109.1 | 472221 | — | — |
 
 ## Interpretation
 

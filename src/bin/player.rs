@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use asciline::codec::{
-    CodecDecoder, MAX_DECOMPRESSED, TAG_PROFILE, TAG_PROFILE_AQ, TAG_PROFILE_HPEL,
+    CodecDecoder, MAX_DECOMPRESSED, TAG_PROFILE, TAG_PROFILE_AQ, TAG_PROFILE_HPEL, TAG_PROFILE_QPEL,
 };
 use asciline::mapper::Mapper;
 use asciline::profile::ProfileDecoder;
@@ -246,6 +246,38 @@ fn play_video(
     Ok(())
 }
 
+/// Jump the reader to the nearest keyframe at/before `target` and arm the
+/// skip-until logic so playback resumes at exactly that frame.
+fn jump_to(
+    reader: &mut std::io::BufReader<std::fs::File>,
+    index: &AscfSeekIndex,
+    seek_target: &mut Option<u32>,
+    target: u32,
+) -> Result<()> {
+    use std::io::{Seek, SeekFrom};
+    match index.floor(target) {
+        Some((kf, off)) => {
+            reader.seek(SeekFrom::Start(off))?;
+            *seek_target = Some(target);
+            println!("\x1b[2K\r[Seek] frame {target} (keyframe {kf})");
+            let _ = std::io::stdout().flush();
+        }
+        None => println!(
+            "\x1b[2K\r[Seek] frame {target} past end ({})",
+            index.total_frames
+        ),
+    }
+    Ok(())
+}
+
+/// Restore raw mode on any exit path (including `?` errors and panics).
+struct RawModeGuard;
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
 /// Play a compiled `.ascf` clip (v2 `ASC2` headers; legacy `ASCF` tolerated).
 fn play_ascf(path: &str, stop: &Arc<AtomicBool>, seek_secs: f64) -> Result<()> {
     use std::io::{Seek, SeekFrom};
@@ -264,25 +296,31 @@ fn play_ascf(path: &str, stop: &Arc<AtomicBool>, seek_secs: f64) -> Result<()> {
     let cell_bytes = if header.pixel { 3 } else { 4 };
     let header_len: u64 = if is_v2 { 18 } else { 14 };
 
-    // ── seek: jump to the nearest keyframe at/before the target frame and
-    //    decode forward from there (both decoders resync at any keyframe). ──
+    // ── seek index: built once on open so both `--seek` and the interactive
+    //    ←/→ keys can jump instantly. One cheap sequential pass over the
+    //    record lengths + 4-byte frame indices (no decompression); rewinds
+    //    the reader to the first record afterwards.
+    let index = AscfSeekIndex::scan(&mut reader, header_len)
+        .with_context(|| format!("seek: cannot index {path:?}"))?;
+    reader.seek(SeekFrom::Start(header_len))?;
+
+    // ── initial seek: jump to the nearest keyframe at/before the target
+    //    frame and decode forward from there (decoders resync at keyframes). ──
     let mut seek_target: Option<u32> = None;
     if seek_secs > 0.0 {
-        let idx = AscfSeekIndex::scan(&mut reader, header_len)
-            .with_context(|| format!("seek: cannot index {path:?}"))?;
         let target = (seek_secs * fps).round().max(0.0) as u32;
-        match idx.floor(target) {
+        match index.floor(target) {
             Some((kf, off)) => {
                 reader.seek(SeekFrom::Start(off))?;
                 seek_target = Some(target);
                 println!(
                     "[Seek] {seek_secs}s → frame {target} ({} keyframes indexed, jump to keyframe {kf} @ {off}B)",
-                    idx.keyframes.len()
+                    index.keyframes.len()
                 );
             }
             None => println!(
                 "[Seek] target {target} past end ({} frames) — playing from start",
-                idx.total_frames
+                index.total_frames
             ),
         }
         let _ = std::io::stdout().flush();
@@ -295,11 +333,17 @@ fn play_ascf(path: &str, stop: &Arc<AtomicBool>, seek_secs: f64) -> Result<()> {
     let pad_x = " ".repeat((t_cols.saturating_sub(cols) / 2) as usize);
 
     print!(
-        "{CLEAR_SCREEN}\x1b[1m[ASCII Player — Rust (.ascf)]\x1b[0m\n  File        : {path}\n  ASCII       : {cols}x{rows}\n  Mode        : {}{}\n  FPS         : {fps:.1}\n  Exit        : Ctrl+C\n\n",
+        "{CLEAR_SCREEN}\x1b[1m[ASCII Player — Rust (.ascf)]\x1b[0m\n  File        : {path}\n  ASCII       : {cols}x{rows}\n  Mode        : {}{}\n  FPS         : {fps:.1}\n  Exit        : Ctrl+C / q\n  Seek        : ← / → (±5 s)\n\n",
         header.mode,
         if header.pixel { " [PIXEL]" } else { "" }
     );
     let _ = std::io::stdout().flush();
+
+    // Raw mode delivers key events without Enter (cooked mode is
+    // line-buffered); it also disables ONLCR, so every newline this render
+    // path emits must be CRLF (see render_ansi / pad_x_per_line).
+    crossterm::terminal::enable_raw_mode()?;
+    let _guard = RawModeGuard;
 
     let mut decoder = CodecDecoder::new(cell_bytes);
     let mut pdec = ProfileDecoder::new(); // tag-4 lossy DCT frames (--profile clips)
@@ -308,8 +352,11 @@ fn play_ascf(path: &str, stop: &Arc<AtomicBool>, seek_secs: f64) -> Result<()> {
     write!(stdout, "{DISABLE_WRAP}{HIDE_CURSOR}{BLACK_BG}")?;
     stdout.flush()?;
 
+    use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+    let seek_step = 5.0; // seconds per ←/→ press
+    let mut cur_idx: u32 = 0;
     let mut len_buf = [0u8; 4];
-    loop {
+    'play: loop {
         if stop.load(Ordering::SeqCst) {
             break;
         }
@@ -333,8 +380,11 @@ fn play_ascf(path: &str, stop: &Arc<AtomicBool>, seek_secs: f64) -> Result<()> {
                 stdout.flush()?;
             }
         } else {
-            let is_profile =
-                msg.len() > 4 && matches!(msg[4], TAG_PROFILE | TAG_PROFILE_AQ | TAG_PROFILE_HPEL);
+            let is_profile = msg.len() > 4
+                && matches!(
+                    msg[4],
+                    TAG_PROFILE | TAG_PROFILE_AQ | TAG_PROFILE_HPEL | TAG_PROFILE_QPEL
+                );
             // Profile frames decode to BGR pixels; adaptive frames to cells.
             let (idx, frame) = if is_profile {
                 pdec.decode(&msg)?
@@ -348,6 +398,7 @@ fn play_ascf(path: &str, stop: &Arc<AtomicBool>, seek_secs: f64) -> Result<()> {
                 }
                 seek_target = None;
             }
+            cur_idx = idx;
             if header.pixel || is_profile {
                 let expect = (cols as usize) * (rows as usize) * 3;
                 if frame.len() != expect {
@@ -368,9 +419,35 @@ fn play_ascf(path: &str, stop: &Arc<AtomicBool>, seek_secs: f64) -> Result<()> {
                 stdout.flush()?;
             }
         }
-        let wait = frame_t.saturating_sub(t0.elapsed());
-        if wait > Duration::ZERO {
-            std::thread::sleep(wait);
+        // Frame pacing, polled in ≤50 ms slices so seek/quit keys stay
+        // responsive without breaking the playback rate.
+        let mut wait = frame_t.saturating_sub(t0.elapsed());
+        while wait > Duration::ZERO {
+            let step = wait.min(Duration::from_millis(50));
+            if event::poll(step).unwrap_or(false) {
+                if let Ok(Event::Key(k)) = event::read() {
+                    match k.code {
+                        KeyCode::Left => {
+                            let target = (cur_idx as f64 - seek_step * fps).max(0.0) as u32;
+                            jump_to(&mut reader, &index, &mut seek_target, target)?;
+                        }
+                        KeyCode::Right => {
+                            let target = cur_idx + (seek_step * fps).round() as u32;
+                            jump_to(&mut reader, &index, &mut seek_target, target)?;
+                        }
+                        KeyCode::Char('q') | KeyCode::Esc => break 'play,
+                        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                            break 'play;
+                        }
+                        _ => {}
+                    }
+                }
+                break; // a key was handled — re-check pacing on the next frame
+            }
+            wait = wait.saturating_sub(step);
+        }
+        if stop.load(Ordering::SeqCst) {
+            break;
         }
     }
 
@@ -387,11 +464,14 @@ fn pixel_to_ansi_cells(frame: &[u8]) -> Vec<u8> {
 }
 
 /// Center `body` with `pad_x` before each line (matches the Python padding).
+/// Uses CRLF: the player runs in raw mode, which disables ONLCR (LF alone
+/// would not return the cursor to column 0).
 fn pad_x_per_line(body: &str, pad_x: &str) -> String {
+    let body = body.replace('\n', "\r\n");
     if pad_x.is_empty() {
-        body.to_string()
+        body
     } else {
-        format!("{pad_x}{}", body.replace('\n', &format!("\n{pad_x}")))
+        format!("{pad_x}{}", body.replace("\r\n", &format!("\r\n{pad_x}")))
     }
 }
 
@@ -403,10 +483,10 @@ fn render_ansi(cells: &[u8], cols: usize, rows: usize, pad_x: &str, pad_y: usize
     for y in 0..rows {
         if y == 0 {
             for _ in 0..pad_y {
-                s.push('\n');
+                s.push_str("\r\n");
             }
         } else {
-            s.push('\n');
+            s.push_str("\r\n");
         }
         for x in 0..cols {
             let cell = &cells[(y * cols + x) * 4..(y * cols + x) * 4 + 4];
@@ -420,7 +500,8 @@ fn render_ansi(cells: &[u8], cols: usize, rows: usize, pad_x: &str, pad_y: usize
         }
     }
     if !pad_x.is_empty() {
-        s = format!("{pad_x}{}", s.replace('\n', &format!("\n{pad_x}")));
+        // pad_x applies at the start of every line (after each CRLF).
+        s = format!("{pad_x}{}", s.replace("\r\n", &format!("\r\n{pad_x}")));
     }
     s
 }

@@ -66,6 +66,7 @@ jobs:
           node experiments/check_profile_vectors.js
           node experiments/check_profile_aq_vectors.js
           node experiments/check_profile_hpel_vectors.js
+          node experiments/check_profile_qpel_vectors.js
           cargo test --test decode_python_vectors -- --ignored
           node experiments/check_rust_vectors.js
 

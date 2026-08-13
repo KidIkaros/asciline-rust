@@ -39,6 +39,16 @@ pub const TAG_PROFILE_AQ: u8 = 5;
 /// integer MVs it extends). A strict superset of tag 5: even half-pel
 /// displacements are plain integer motion, so the encoder is never worse.
 pub const TAG_PROFILE_HPEL: u8 = 6;
+/// Tag 7: the lossy DCT profile with quarter-pixel motion compensation
+/// (H.264-style). Same keyframe header as tag 6 (`[QF][cols u16][rows u16]
+/// [aq_levels u8]`, always present); the tag signals that inter-frame motion
+/// vectors are quarter-pel units and the decoder interpolates the luma
+/// reference with H.264's 6-tap half-pel filter + bilinear quarter-pel step
+/// (luma plane only, identical integer math in Rust and web/codec.js). A
+/// strict superset of tag 6 — every half-pel displacement is representable in
+/// quarter-pel units, and the encoder falls back to half-pel/integer vectors
+/// whenever sub-pixel motion does not help — so it is never worse.
+pub const TAG_PROFILE_QPEL: u8 = 7;
 
 pub const KEYFRAME_INTERVAL: u32 = 48;
 pub const DEFAULT_LEVEL: u32 = 3;

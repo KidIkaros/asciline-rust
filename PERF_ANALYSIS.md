@@ -115,13 +115,22 @@ this machine**, not an unlimited-performance guarantee: source codec, grid,
 mode, CPU, network, client, and scheduler determine the practical ceiling.
 Re-run with `experiments/measure_throughput.sh`.
 
-### 3d. Terminal player (real-time check)
+### 3d. Terminal player (real-time display check)
+
+A clip that completes in its own duration is being *displayed* in real time at
+its native frame rate. The player is the honest display measurement because it
+is not capped by a browser's display refresh rate. Representative runs:
 
 | run | wall time | video | verdict |
 |---|---|---|---|
 | 240 cols @60 fps | 10.21 s | 10 s / 600 frames | real-time at 60 fps |
 | 480 cols @60 fps | 10.44 s | 10 s / 600 frames | real-time at 60 fps |
 | 720p source, 560 cols @60 fps | 5.31 s | 5 s / 300 frames | real-time at 60 fps |
+| 100 cols, 4 s testsrc2 @60 fps | 4.35 s | 4 s / 240 frames | real-time at 60 fps |
+| 100 cols, 4 s testsrc2 @120 fps | 4.30 s | 4 s / 480 frames | real-time at 120 fps |
+
+Full repeatable table: `experiments/measure_player_display.sh` and
+`samples/evidence/player_display_benchmark.md`.
 
 ### 3e. End-to-end latency at 120 fps (frame in → wire out → decode → display)
 

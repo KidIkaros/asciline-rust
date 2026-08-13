@@ -129,12 +129,20 @@ Also shipped: **`asciline-render`** — headless `.ascf` → PPM frame renderer
 asciline-compile your_video.mp4 --cols 250 --pixel --quantize 2
 asciline-compile your_video.mp4 --mode 6 --hard
 asciline-compile your_video.mp4 --profile --qf 70   # smallest files (lossy DCT)
+asciline-compile 120fps.mp4 --fps 120 --pixel      # keep high rate (no 30 cap)
 ```
 
 Writes the v2 `ASC2` container: 18-byte header + length-prefixed codec frames,
 plus the extracted `*.mp3` audio track. Playable by `asciline-player`, the
 original `static_player/`, and the Studio IDE. Options mirror the original:
 `--cols/--rows/--mode/--pixel/--tolerance/--quantize/--hard/--out/--out-dir/--fps`.
+
+Rate semantics: the **compiler** defaults to the original's >30 fps decimation
+(compile offline, so it preserves the original's default output rate) unless
+`--fps N` is given; the **server** and **terminal player** have no cap and
+display the source at its native rate. See
+[Speed versus playback rate](#speed-versus-playback-rate) and the display
+benchmark below.
 
 ### `--profile` — lossy DCT compression (tag 4)
 
@@ -369,9 +377,31 @@ decode, grid size, codec mode, CPU, and network. Full methodology and logs:
 [`samples/evidence/throughput_matrix.md`](samples/evidence/throughput_matrix.md),
 and [`samples/evidence/throughput_benchmark.log`](samples/evidence/throughput_benchmark.log).
 
+### Display runs at the source's native rate (terminal player)
+
+The throughput numbers above measure the server/wire side. The question a
+viewer actually cares about — *will it display faster than 30 fps?* — is a
+separate measurement, and the answer is yes: the terminal player (which is not
+display-refresh-bound like a browser) renders the source at its native rate.
+Repeated wall-time runs on a deterministic 4 s source:
+
+| Source | Frames | Player wall | Real-time? |
+|---|---:|---:|---|
+| 30 fps | 120 | 4.40 s | yes |
+| 60 fps | 240 | 4.35 s | yes |
+| 120 fps | 480 | 4.30 s | yes |
+
+A 4 s clip that completes in ~4 s is playing in real time at that frame rate.
+The source, not the software, sets the ceiling: a 30 fps cartoon displays at
+30 fps, a 120 fps source at 120 fps. Browsers are capped by the display refresh
+rate, so the terminal is the honest proof. Full report:
+[`samples/evidence/player_display_benchmark.md`](samples/evidence/player_display_benchmark.md),
+rerun with `experiments/measure_player_display.sh`.
+
 The samples are committed; regenerate visual quality artifacts with
-`experiments/make_samples.sh` and throughput artifacts with
-`experiments/measure_throughput.sh`.
+`experiments/make_samples.sh`, throughput artifacts with
+`experiments/measure_throughput.sh`, and the display benchmark with
+`experiments/measure_player_display.sh`.
 
 ## Architecture
 

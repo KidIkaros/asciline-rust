@@ -63,6 +63,23 @@ GIF/MP4 playback rate is not used as proof of throughput because browsers and
 video players can throttle presentation. The benchmark proves measured rates
 on this machine, not an unlimited performance guarantee on every machine.
 
+## Display rate evidence
+
+The [`terminal player display benchmark`](evidence/player_display_benchmark.md)
+answers the question users actually care about: does the *display* run faster
+than 30 fps? The terminal player (not display-refresh-bound like a browser)
+renders a deterministic 4 s source in real time at 30, 60, and 120 fps:
+
+| Source | Frames | Duration | Player wall | Real-time? |
+|---|---:|---:|---:|---|
+| 30 fps | 120 | 4 s | 4.40 s | yes |
+| 60 fps | 240 | 4 s | 4.35 s | yes |
+| 120 fps | 480 | 4 s | 4.30 s | yes |
+
+The display rate equals the source rate; the software imposes no cap. The
+compiler, by contrast, defaults to the original's >30 fps decimation for
+offline `.ascf` production unless `--fps N` is given.
+
 For end-to-end latency, use:
 
 ```sh

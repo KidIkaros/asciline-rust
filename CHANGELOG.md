@@ -38,6 +38,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
   frames at 124.9/249.3/494.7 fps respectively; `throughput_120fps.mp4` and
   `.gif` capture the actual 120 fps wire frames for visual inspection. This is
   a benchmark result, not an unlimited-machine guarantee.
+- Display-rate evidence: `experiments/measure_player_display.sh` proves the
+  terminal player (not display-refresh-bound like a browser) renders the
+  source at its native rate — a deterministic 4 s clip plays in real time at
+  30/60/120 fps (4.40/4.35/4.30 s). This separates *display* FPS from server
+  wire throughput and from offline compile FPS.
 - `tests/load_server.rs` — a real-binary concurrent load test proving
   `--max-clients` under contention (both in-cap clients stream, `/healthz`
   reports the exact in-use count, the overflow connection is rejected, and a

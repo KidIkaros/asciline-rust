@@ -2,7 +2,8 @@
 //! `ProfileEncoder` / `makeProfileDecoder` pair from `codec.py` / `codec.js`.
 //!
 //! This is the maximum-compression `.ascf` profile: frames are converted to
-//! YUV 4:2:0, every 8×8 block is motion-compensated (luma, ±3 integer search),
+//! YUV 4:2:0, every 8×8 block is motion-compensated (luma, integer search,
+//! optionally rate-distortion optimized),
 //! transformed with a deterministic **integer** DCT basis (`round(F*64)`),
 //! quantized with JPEG-style tables scaled by a quality factor, and the
 //! non-zero zigzag coefficients are run-length coded with DC DPCM. Skipped
@@ -38,8 +39,11 @@ use crate::quality::{psnr, ssim, QualityStats};
 
 /// Forced keyframe interval (same as the adaptive codec's).
 const KEY: u32 = 48;
-/// Motion search radius (integer pixels).
-const R_SEARCH: i32 = 3;
+/// Default motion search radius (integer pixels) — codec.py uses ±3.
+pub const DEFAULT_R_SEARCH: i32 = 3;
+/// Rate-distortion motion refinement: how many lowest-SAD candidates receive a
+/// full DCT + quantize + rate evaluation before the vector is chosen.
+const RDO_K: usize = 8;
 /// Default dead-zone: coefficients with |t| below this round to zero.
 const DEFAULT_DZ: f64 = 0.75;
 /// Default skip threshold: inter blocks with SSE below this and zero motion
@@ -203,6 +207,13 @@ pub struct ProfileEncoder {
     pub qf: u8,
     pub dz: f64,
     pub skip_t: f64,
+    /// Motion search radius (integer pixels, ±N). Larger radii help smooth
+    /// pans/zooms (e.g. drone footage); ±3 matches codec.py.
+    pub r_search: i32,
+    /// Rate-distortion λ for motion-vector selection. `0.0` = pure SAD (the
+    /// original behavior); `> 0` enables SAD-prefilter + RDO refinement, which
+    /// trades a little encode time for fewer bits at the same distortion.
+    pub rdo_lambda: f64,
     pub level: u32,
     /// Scene-cut detection: mean absolute luma deviation vs the previous
     /// reconstruction above which an inter frame is re-encoded as a keyframe.
@@ -243,6 +254,8 @@ impl ProfileEncoder {
             qf,
             dz,
             skip_t,
+            r_search: DEFAULT_R_SEARCH,
+            rdo_lambda: 0.0,
             level,
             scene_cut_mad: 0.0, // disabled by default: bit-exact original behavior
             collect_stats: true,
@@ -374,6 +387,8 @@ impl ProfileEncoder {
                 qm,
                 self.dz,
                 self.skip_t,
+                self.r_search,
+                self.rdo_lambda,
             );
             payload.extend_from_slice(&body);
             recons[pi] = rec;
@@ -467,13 +482,12 @@ struct BlockEnc {
     rec: [[u8; 8]; 8],
 }
 
-/// Compute one block's motion vector, quantized coefficients, skip decision
-/// and reconstruction. A pure function of the block's inputs (current plane,
-/// previous reconstruction, quant table) — every block is independent, so
-/// this runs in parallel; results are bit-identical to the serial loop.
+/// Prediction block for a candidate motion vector: the edge-clamped previous
+/// frame shifted by (dx, dy), or a flat 128 predictor on keyframes / no-MV
+/// planes. Identical math to the inline version this replaces.
+#[inline]
 #[allow(clippy::too_many_arguments)]
-fn enc_block(
-    cur: &[u8],
+fn build_pred(
     prev: Option<&Plane>,
     w: usize,
     h: usize,
@@ -481,42 +495,9 @@ fn enc_block(
     bx: usize,
     ftype: u8,
     use_mv: bool,
-    qm: &[i64; 64],
-    dz: f64,
-    skip_t: f64,
-    f: &[[f64; 8]; 8],
-) -> BlockEnc {
-    // current block as f64
-    let mut cur_b = [[0f64; 8]; 8];
-    for y in 0..8 {
-        for x in 0..8 {
-            cur_b[y][x] = cur[(by * 8 + y) * w + bx * 8 + x] as f64;
-        }
-    }
-
-    // motion search (luma inter only): scan dy outer, dx inner, (0,0)
-    // preferred on ties — identical ordering to codec.py
-    let mut mvx: i32 = 0;
-    let mut mvy: i32 = 0;
-    if ftype == 1 && use_mv {
-        let prev_buf = &prev.as_ref().unwrap().buf;
-        let mut best = block_sad(cur, prev_buf, w, h, by, bx, 0, 0);
-        for dy in -R_SEARCH..=R_SEARCH {
-            for dx in -R_SEARCH..=R_SEARCH {
-                if dx == 0 && dy == 0 {
-                    continue;
-                }
-                let s = block_sad(cur, prev_buf, w, h, by, bx, dx, dy);
-                if s < best {
-                    best = s;
-                    mvx = dx;
-                    mvy = dy;
-                }
-            }
-        }
-    }
-
-    // predict
+    mvx: i32,
+    mvy: i32,
+) -> [[f64; 8]; 8] {
     let mut pred = [[0f64; 8]; 8];
     if ftype == 0 {
         for y in 0..8 {
@@ -540,8 +521,21 @@ fn enc_block(
             }
         }
     }
+    pred
+}
 
-    // residual + SSE
+/// Residual + forward DCT + dead-zone quantize for one block against a given
+/// predictor. Returns the SSE (distortion), the quantized coefficient matrix
+/// (for DC DPCM + zigzag RLE) and the count of non-zero coefficients — a
+/// first-order rate estimate used by rate-distortion vector selection.
+#[inline]
+fn dct_quant(
+    cur_b: &[[f64; 8]; 8],
+    pred: &[[f64; 8]; 8],
+    qm: &[i64; 64],
+    dz: f64,
+    f: &[[f64; 8]; 8],
+) -> (f64, [[i64; 8]; 8], u32) {
     let mut resid = [[0f64; 8]; 8];
     let mut sse = 0f64;
     for y in 0..8 {
@@ -576,7 +570,7 @@ fn enc_block(
 
     // quantize with dead-zone
     let mut cq = [[0i64; 8]; 8];
-    let mut all_zero = true;
+    let mut nnz = 0u32;
     for y in 0..8 {
         for x in 0..8 {
             let tv = t[y][x] / qm[y * 8 + x] as f64;
@@ -584,14 +578,97 @@ fn enc_block(
             let qi = q as i64;
             cq[y][x] = qi;
             if qi != 0 {
-                all_zero = false;
+                nnz += 1;
+            }
+        }
+    }
+    (sse, cq, nnz)
+}
+
+/// Compute one block's motion vector, quantized coefficients, skip decision
+/// and reconstruction. A pure function of the block's inputs (current plane,
+/// previous reconstruction, quant table) — every block is independent, so
+/// this runs in parallel; results are bit-identical to the serial loop.
+#[allow(clippy::too_many_arguments)]
+fn enc_block(
+    cur: &[u8],
+    prev: Option<&Plane>,
+    w: usize,
+    h: usize,
+    by: usize,
+    bx: usize,
+    ftype: u8,
+    use_mv: bool,
+    qm: &[i64; 64],
+    dz: f64,
+    skip_t: f64,
+    f: &[[f64; 8]; 8],
+    r_search: i32,
+    rdo_lambda: f64,
+) -> BlockEnc {
+    // current block as f64
+    let mut cur_b = [[0f64; 8]; 8];
+    for y in 0..8 {
+        for x in 0..8 {
+            cur_b[y][x] = cur[(by * 8 + y) * w + bx * 8 + x] as f64;
+        }
+    }
+
+    // motion search (luma inter only): scan dy outer, dx inner, (0,0)
+    // preferred on ties. When RDO is enabled, rank every candidate by SAD
+    // first, keep the lowest K, then refine with a full DCT + quantize +
+    // rate cost so the vector minimizes distortion + λ·bits, not just SAD.
+    let mut mvx: i32 = 0;
+    let mut mvy: i32 = 0;
+    if ftype == 1 && use_mv {
+        let prev_buf = &prev.as_ref().unwrap().buf;
+        if rdo_lambda > 0.0 {
+            let n = (2 * r_search + 1) as usize;
+            let mut cands: Vec<(i32, i32, i32)> = Vec::with_capacity(n * n);
+            for dy in -r_search..=r_search {
+                for dx in -r_search..=r_search {
+                    let s = block_sad(cur, prev_buf, w, h, by, bx, dx, dy);
+                    cands.push((dx, dy, s));
+                }
+            }
+            cands.sort_by_key(|&(_, _, s)| s);
+            cands.truncate(RDO_K);
+            let mut best_cost = f64::INFINITY;
+            for (dx, dy, _) in cands {
+                let pred = build_pred(prev, w, h, by, bx, ftype, use_mv, dx, dy);
+                let (sse, _, nnz) = dct_quant(&cur_b, &pred, qm, dz, f);
+                let cost = sse + rdo_lambda * nnz as f64;
+                if cost < best_cost {
+                    best_cost = cost;
+                    mvx = dx;
+                    mvy = dy;
+                }
+            }
+        } else {
+            let mut best = block_sad(cur, prev_buf, w, h, by, bx, 0, 0);
+            for dy in -r_search..=r_search {
+                for dx in -r_search..=r_search {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let s = block_sad(cur, prev_buf, w, h, by, bx, dx, dy);
+                    if s < best {
+                        best = s;
+                        mvx = dx;
+                        mvy = dy;
+                    }
+                }
             }
         }
     }
 
+    // predict + residual + DCT + dead-zone quantize (shared with the RDO path)
+    let pred = build_pred(prev, w, h, by, bx, ftype, use_mv, mvx, mvy);
+    let (sse, cq, nnz) = dct_quant(&cur_b, &pred, qm, dz, f);
+
     // skip decision (inter only)
     let is_skip =
-        ftype == 1 && mvx == 0 && mvy == 0 && (all_zero || (skip_t > 0.0 && sse < skip_t));
+        ftype == 1 && mvx == 0 && mvy == 0 && (nnz == 0 || (skip_t > 0.0 && sse < skip_t));
 
     // reconstruct
     let mut rec_b = [[0u8; 8]; 8];
@@ -648,6 +725,8 @@ fn enc_plane(
     qm: &[i64; 64],
     dz: f64,
     skip_t: f64,
+    r_search: i32,
+    rdo_lambda: f64,
 ) -> (Vec<u8>, Plane) {
     let nbx = w / 8;
     let nby = h / 8;
@@ -660,7 +739,9 @@ fn enc_plane(
         .map(|bi| {
             let by = bi / nbx;
             let bx = bi % nbx;
-            enc_block(cur, prev, w, h, by, bx, ftype, use_mv, qm, dz, skip_t, f)
+            enc_block(
+                cur, prev, w, h, by, bx, ftype, use_mv, qm, dz, skip_t, f, r_search, rdo_lambda,
+            )
         })
         .collect();
 

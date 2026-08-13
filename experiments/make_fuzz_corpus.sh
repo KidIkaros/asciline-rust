@@ -35,8 +35,10 @@ ffmpeg -y -v error \
     -filter_complex '[0:v][1:v]concat=n=2:v=1[v]' -map '[v]' -pix_fmt yuv420p \
     -c:v ffv1 -f matroska "$TMP/clip.mkv"
 
-# tag-4 lossy DCT profile (cell-independent) — the deep DCT decoder paths
-"$BIN" "$TMP/clip.mkv" --cols 240 --profile --qf 70 --no-quality --out "$TMP/prof" >/dev/null
+# tag-4 lossy DCT profile (cell-independent) — the deep DCT decoder paths.
+# Pin --r-search 3 (codec.py's radius) so the committed seeds stay byte-stable
+# regardless of the compiler's newer default radius.
+"$BIN" "$TMP/clip.mkv" --cols 240 --profile --qf 70 --no-quality --r-search 3 --out "$TMP/prof" >/dev/null
 # adaptive, cell=4 (text mode, 16 M colours)
 "$BIN" "$TMP/clip.mkv" --cols 40 --mode 6 --tolerance 8 --no-quality --out "$TMP/adapt4" >/dev/null
 # adaptive, cell=3 (pixel mode)

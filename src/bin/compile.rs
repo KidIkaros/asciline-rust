@@ -66,6 +66,14 @@ struct Args {
     /// Profile quality factor 1-100 (default 70).
     #[arg(long, default_value_t = 70)]
     qf: u8,
+    /// Profile motion search radius (±N integer pixels; default 7). Larger
+    /// radii improve fast/large motion (e.g. 30 fps footage); 3 = codec.py.
+    #[arg(long, default_value_t = 7)]
+    r_search: i32,
+    /// Profile rate-distortion λ for motion-vector selection (0 = pure SAD).
+    /// A positive value enables SAD-prefilter + RDO refinement.
+    #[arg(long, default_value_t = 0.0)]
+    rdo_lambda: f64,
     /// Maximum zlib compression (level 9) — slower, smaller file.
     #[arg(long)]
     hard: bool,
@@ -207,6 +215,8 @@ fn main() -> Result<()> {
     let mut adaptive_stats = QualityStats::new();
     let mut profile_enc = if profile {
         let mut pe = ProfileEncoder::new(cols as usize, rows as usize, args.qf.clamp(1, 100));
+        pe.r_search = args.r_search.max(0);
+        pe.rdo_lambda = args.rdo_lambda.max(0.0);
         if args.hard {
             pe.level = 9; // --hard applies to the profile's zlib stage too
         }

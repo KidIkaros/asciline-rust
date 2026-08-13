@@ -49,9 +49,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
   not duplicated frames) compiled and rendered at native 60 fps
   (`--fps 60`). Adds SOURCE | PIXEL | PROFILE and profile-only comparisons
   (`drone_compare.*`, `drone_profile.*`), stills, playable `.ascf` samples,
-  and a `drone_profile_quality.txt` report (PSNR-Y 37.86 dB / SSIM-Y 0.9464,
-  10.1 MB lossless → 233 KB, ~44×). This is the visible proof that content
+  and a `drone_profile_quality.txt` report (PSNR-Y 37.89 dB / SSIM-Y 0.9470,
+  10.1 MB lossless → 240 KB, ~44×). This is the visible proof that content
   above 30 fps displays at its native rate.
+- Profile motion-search knobs: `--r-search N` (search radius, default **7**,
+  up from codec.py's ±3) and `--rdo-lambda L` (rate-distortion vector
+  selection, 0 = off). The wider default makes the Big Buck Bunny profile
+  ~2.7% smaller at +0.10 dB PSNR-Y (9.78 MB → 337 KB, 36.57 dB) for ~2.7× the
+  profile encode cost — offline only, display FPS is unchanged; pass
+  `--r-search 3` for codec.py parity. RDO is an opt-in size↔quality knob
+  (A/B'd by `experiments/measure_profile_ab.sh`); its `nnz` rate estimate is
+  deliberately crude so it stays off by default. The library keeps radius 3
+  for bit-exact parity — only the CLI default changed.
 - `tests/load_server.rs` — a real-binary concurrent load test proving
   `--max-clients` under contention (both in-cap clients stream, `/healthz`
   reports the exact in-use count, the overflow connection is rejected, and a

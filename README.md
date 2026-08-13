@@ -135,7 +135,7 @@ asciline-compile 120fps.mp4 --fps 120 --pixel      # keep high rate (no 30 cap)
 Writes the v2 `ASC2` container: 18-byte header + length-prefixed codec frames,
 plus the extracted `*.mp3` audio track. Playable by `asciline-player`, the
 original `static_player/`, and the Studio IDE. Options mirror the original:
-`--cols/--rows/--mode/--pixel/--tolerance/--quantize/--hard/--out/--out-dir/--fps`.
+`--cols/--rows/--mode/--pixel/--tolerance/--quantize/--hard/--out/--out-dir/--fps/--r-search/--rdo-lambda`.
 
 Rate semantics: the **compiler** defaults to the original's >30 fps decimation
 (compile offline, so it preserves the original's default output rate) unless
@@ -297,17 +297,17 @@ asciline-render samples/big_buck_bunny_profile.ascf --out frames \
 ```
 
 The `--profile` file is the headline: it retains recognizable cartoon detail
-while using substantially fewer bytes — **9.78 MB lossless pixel → 346 KB
-profile (~28× smaller)** on this 8-second excerpt. The exact PSNR/SSIM report, including
+while using substantially fewer bytes — **9.78 MB lossless pixel → 337 KB
+profile (~29× smaller)** on this 8-second excerpt. The exact PSNR/SSIM report, including
 the worst frame, is in
 [`samples/big_buck_bunny_profile_quality.txt`](samples/big_buck_bunny_profile_quality.txt).
 The QF=40/70/90 size-quality trade-off is:
 
 | QF | Profile size | Pixel/profile | PSNR-Y | SSIM-Y | PSNR-RGB |
 |---:|---:|---:|---:|---:|---:|
-| 40 | 216,929 B | 45.1× | 33.80 dB | 0.9432 | 30.21 dB |
-| 70 | 346,405 B | 28.2× | 36.47 dB | 0.9670 | 32.13 dB |
-| 90 | 684,437 B | 14.3× | 41.14 dB | 0.9861 | 34.57 dB |
+| 40 | 210,854 B | 46.4× | 33.92 dB | 0.9465 | 30.25 dB |
+| 70 | 337,023 B | 29.0× | 36.57 dB | 0.9686 | 32.16 dB |
+| 90 | 669,483 B | 14.6× | 41.23 dB | 0.9867 | 34.58 dB |
 
 The generated matrix is also available at
 [`samples/big_buck_bunny_quality_matrix.md`](samples/big_buck_bunny_quality_matrix.md).
@@ -322,12 +322,16 @@ Offline compile speed is a separate measurement:
 |---|---:|---:|---:|
 | ASCII mode | 30 | 216.2 | 2,620,569 B |
 | PIXEL lossless | 30 | 111.1 | 9,779,783 B |
-| PROFILE QF=70 | 30 | 190.5 | 346,405 B |
-| PROFILE QF=70, no quality report | 30 | 292.7 | 346,405 B |
+| PROFILE QF=70 | 30 | 71.4 | 337,023 B |
+| PROFILE QF=70, no quality report | 30 | 106.2 | 337,023 B |
 
 These are representative measurements on the pinned 240-frame excerpt; compile
-FPS means frames processed per wall-second, not playback FPS. The full report
-and rerun script are [`samples/big_buck_bunny_speed_analysis.md`](samples/big_buck_bunny_speed_analysis.md)
+FPS means frames processed per wall-second, not playback FPS. The profile's
+±7 motion search (the default) is ~4.6× the SAD work of codec.py's ±3, so
+profile compile is ~2.7× slower than a ±3 baseline (`--r-search 3` trades back
+the size/quality gain for original speed); display FPS is unaffected. The full
+report and rerun script are
+[`samples/big_buck_bunny_speed_analysis.md`](samples/big_buck_bunny_speed_analysis.md)
 and `experiments/measure_sample_speed.sh`. GIFs are intentionally downsampled
 previews and must not be used to compare playback speed; use the synchronized
 MP4s and this table.
@@ -369,7 +373,7 @@ Every panel is labeled **clip 60 fps**, and the full-resolution MP4 is
 <img src="samples/evidence/drone_profile.gif" width="560" alt="60 fps drone flight profile-only playback"/>
 
 On this 8-second, 480-frame clip the lossy profile is **10.1 MB lossless pixel
-→ 233 KB (~44× smaller)** at **PSNR-Y 37.86 dB / SSIM-Y 0.9464** (worst frame
+→ 240 KB (~44× smaller)** at **PSNR-Y 37.89 dB / SSIM-Y 0.9470** (worst frame
 #240, PSNR-Y 35.05 dB). Full report:
 [`samples/drone_profile_quality.txt`](samples/drone_profile_quality.txt).
 Attribution and checksums are in [`samples/SOURCE.md`](samples/SOURCE.md).

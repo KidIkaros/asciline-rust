@@ -61,6 +61,16 @@ always prints the mean/min/max PSNR-Y + SSIM-Y + PSNR-RGB report.
    precomputed plane warranted. Re-run anytime with
    `cargo run --release --example decode_bench -- samples/drone_profile.ascf`.
 
+## Parked / pending
+
+- **Release v0.2.0** — deliberately held. Everything since v0.1.0 (27 commits:
+  tags 5-7, seek, rate control, fuzz infra, deploy kit, regenerated evidence)
+  is CI-green and ready, but we chose to wait for more stability and ship the
+  release once the next batch of roadmap items lands. Zero-touch pipeline:
+  bump `Cargo.toml` → rewrite `RELEASE-NOTES.md` → push `v0.2.0` tag →
+  `.github/workflows/release.yml` builds the tarball + evidence assets and
+  publishes the GitHub Release.
+
 ## Medium horizon
 
 4. **AQ model upgrades** (tag 5 already extensible — the map signals the

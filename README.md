@@ -208,6 +208,28 @@ where the eye looks instead of uniformly. Without rate control the fixed-QF
 size grows (detail-dense footage more so); that is the honest trade-off, and
 `--aq 2` beat `--aq 4` on both size and quality in our measurements.
 
+**Rate control (`--target-size`, wire-compatible):** fixed-QF compiles are
+size roulette — the same QF lands at different sizes per clip. `--target-size`
+inverts the question: pick the file size, get the per-keyframe QF allocation.
+The compiler probes once at `--qf`, then re-encodes with a **per-keyframe QF
+schedule** — a marginal-allocation pass gives each GOP its own QF (complex
+scenes get more bits, flat ones fewer) and re-fits each GOP's measured size
+curve until the total lands within ±5% of the target.
+
+```bash
+asciline-compile clip.mp4 --profile --target-size 450K  # "make it 450 KB"
+asciline-compile clip.mp4 --profile --target-size 1.2M  # suffixes K/M accepted
+```
+
+No wire change: keyframes already self-describe their QF (`payload[1]`), so
+every decoder — the shipped `codec.js` and `asciline-player` — plays a
+rate-controlled stream bit-exactly. Measured on the pinned clips (base QF=70,
+cols=240): targets from 0.5× to 3.7× the natural size all landed within ±5%
+(BBB: 90 KB → 93.4, 380 KB → 371.6, 500 KB → 483.8, 650 KB → 623.2; drone
+60 fps: 300 KB → 313.1, 400 KB → 418.5, 520 KB → 540.1), typically in two to
+three encode passes. Expect a 2-3× compile-time cost — the price of hitting a
+target instead of gambling on a QF.
+
 **Half-pixel motion (tag 6):** the motion search refines the best integer
 vector to half-pel precision (two-stage integer → subpel refine, the standard
 approach) and the decoder interpolates the luma reference bilinearly —

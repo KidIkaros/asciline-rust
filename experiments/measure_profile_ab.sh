@@ -45,6 +45,28 @@ PY
     printf '%-16s %12s B  PSNR-Y %8s  SSIM-Y %7s  %ss\n' "$label" "$size" "$psnr" "$ssim" "$wall"
 }
 
+# Rate control: --target-size re-encodes with a per-keyframe QF schedule to
+# hit a target size. The deviation column shows how close it landed.
+run_target_case() {
+    local label="$1" target="$2"
+    local out="$TMP/rc" t0 t1 size psnr ssim wall dev
+    t0=$(date +%s.%N)
+    "$BIN" "$SOURCE" --cols "$COLS" --profile --fps "$FPS" \
+        --target-size "$target" --out "$out" > "$TMP/report.txt" 2>&1
+    t1=$(date +%s.%N)
+    size=$(stat -c %s "$out.ascf")
+    psnr=$(grep 'PSNR-Y' "$TMP/report.txt" | head -1 | awk '{print $3}')
+    ssim=$(grep 'SSIM-Y' "$TMP/report.txt" | head -1 | awk '{print $3}')
+    dev=$(grep '\[Rate control\] final' "$TMP/report.txt" | grep -oE '[+-][0-9.]+%' | head -1)
+    wall=$(python3 - "$t0" "$t1" <<'PY'
+import sys
+print(f"{float(sys.argv[2]) - float(sys.argv[1]):.2f}")
+PY
+)
+    printf '%-16s %12s B  PSNR-Y %8s  SSIM-Y %7s  %ss  (%s vs target)\n' \
+        "$label" "$size" "$psnr" "$ssim" "$wall" "$dev"
+}
+
 echo "# Profile motion-search + AQ + sub-pel A/B"
 echo "# source: $SOURCE (cols=$COLS qf=$QF fps=$FPS)"
 printf '%-16s %12s  %8s  %7s  %s\n' "config" "size" "PSNR-Y" "SSIM-Y" "wall"
@@ -61,3 +83,8 @@ run_case "r7 halfpel"      7   0     2   1
 run_case "r7 halfpel aq0"  7   0     0   1
 run_case "r7 qpel (default)" 7  0     2   2
 run_case "r7 qpel aq0"     7   0     0   2
+
+# ── rate control (targets are relative to the default's natural size; the
+#    drone 60fps clip at cols=240/QF=70 lands around 460 KB) ──
+run_target_case "rc->420K"   "420K"
+run_target_case "rc->300K"   "300K"

@@ -28,33 +28,38 @@ always prints the mean/min/max PSNR-Y + SSIM-Y + PSNR-RGB report.
 
 ## Top priorities (short horizon)
 
-1. **Rate control (`--target-size`)** — the single most valuable feature left.
-   Problem today: fixed-QF is a quality↔size roulette (AQ +0.38×, qpel +0.12×
-   on the drone at QF=70); the README has to caveat every headline number.
-   Design (wire-compatible — QF is already signaled per keyframe):
-   - Measure bytes produced since the previous keyframe (or a preview pass).
-   - Per-keyframe feedback: `qf_next = qf_cur * sqrt(target / achieved)`,
-     clamped, plus an overall scale computed from the first keyframe.
-   - Interaction with AQ: rate control adjusts the base QF; AQ continues to
-     shift bits within the frame (that is its whole point).
-   - Scene-cut keyframes inherit the current QF (no re-tuning mid-cut).
-   - Acceptance: hit a target size within ±5% on BBB and the drone; document
-     the quality at that size instead of a size at that quality.
-   - Trap: the fuzz corpus and sample evidence must be pinned to
-     `--no-hpel --aq 0` (already done for the corpus) so the new default
-     doesn't churn the committed bytes.
+1. **Rate control (`--target-size`)** — ✅ **done.** Per-keyframe QF
+   allocation, wire-compatible (keyframes already self-describe their QF):
+   the compiler probes at the base QF, then re-encodes with a per-GOP QF
+   schedule from a marginal-allocation pass over piecewise-linear per-GOP
+   size curves (refit from each measured pass; sign-flip damping converges
+   overshoots geometrically). Acceptance met on both pinned clips — targets
+   from 0.5× to 3.7× the natural size within ±5% (BBB: 90 KB → 93.4, 380 KB
+   → 371.6, 500 KB → 483.8, 650 KB → 623.2; drone 60 fps: 300 KB → 313.1,
+   400 KB → 418.5, 520 KB → 540.1), typically 2-3 encode passes. AQ composes
+   unchanged (it shifts bits within a frame; rate control moves the base QF).
+   Remaining idea if we revisit: a single-pass variant (adjust QF between
+   keyframes from the running total) for near-real-time compiles — two-pass
+   is the price of the ±5% guarantee.
 
-2. **Visual A/B evidence for quarter-pel.** The metric says qpel is a wash on
-   BBB (+0.08 dB drone, +12% size). Before we keep claiming it as the default,
-   produce a side-by-side GIF (tag 6 vs tag 7 at QF 70, drone pan section) so
-   *we* can see whether the smoother pans are perceptible. If not, consider
-   flipping the default back to tag 6 (smaller at equal quality on BBB).
-   This is cheap and decides the most defensible default.
+2. **Visual A/B evidence for quarter-pel** — ✅ **done.** Side-by-side GIF of
+   tag 6 vs tag 7 on the drone pan (QF=70, 60 fps):
+   `experiments/make_qpel_ab.sh` → `samples/evidence/drone_qpel_ab.gif`
+   (+ `.mp4`). Verdict: at +0.08 dB PSNR-Y the difference is imperceptible in
+   the side-by-side — the default stays tag 7 (the user's call: a strict
+   superset that never searches worse, and the small win on camera motion
+   is real even if not visible in a downscaled GIF). If size ever matters
+   more than the last 0.08 dB, flipping to tag 6 is a documented one-flag
+   change.
 
-3. **Decode-side performance check for tag 7.** Sub-pel interpolation runs on
-   the decode path (player + `web/codec.js`). Confirm the 6-tap filter keeps
-   display ≥60 fps on the drone sample — if it bites, add a small
-   half-pel-only fast path or precompute the 6-tap plane once per frame.
+3. **Decode-side performance check for tag 7** — ✅ **done, no action
+   needed.** New `examples/decode_bench.rs` decodes an `.ascf` through the
+   exact player codec path with zero display I/O. At cols=240 on this
+   machine: tag 7 (quarter-pel, the worst case) decodes at **~950 fps** on
+   the drone 60 fps sample (BBB: ~560 fps) — 9-15× the 60 fps display rate.
+   The 6-tap interpolation is nowhere near a bottleneck; no fast path or
+   precomputed plane warranted. Re-run anytime with
+   `cargo run --release --example decode_bench -- samples/drone_profile.ascf`.
 
 ## Medium horizon
 

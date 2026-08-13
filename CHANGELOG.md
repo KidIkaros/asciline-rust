@@ -8,6 +8,33 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
 
 ### Added
 
+- **Rate control (`asciline-compile --target-size`, wire-compatible)** —
+  pick the `.ascf` size, get the per-keyframe QF allocation: the compiler
+  probes once at `--qf`, then re-encodes with a per-keyframe QF schedule
+  (each GOP gets its own QF from a marginal-allocation pass — complex scenes
+  more bits, flat ones fewer — over piecewise-linear per-GOP size curves
+  refit from each measured pass, with sign-flip damping so overshoots
+  converge geometrically). No wire change: keyframes already self-describe
+  their QF (`payload[1]`), so the shipped `codec.js` and `asciline-player`
+  play rate-controlled streams bit-exactly. Measured at base QF=70,
+  cols=240 on the pinned clips: targets from 0.5× to 3.7× the natural size
+  landed within ±5% (BBB: 90 KB → 93.4, 380 KB → 371.6, 500 KB → 483.8,
+  650 KB → 623.2; drone 60 fps: 300 KB → 313.1, 400 KB → 418.5, 520 KB →
+  540.1), typically in two to three encode passes. Suffixes accepted
+  (`450K`, `1.2M`). Compile time scales with the passes (probe + schedule),
+  the documented price of hitting a target. Unit tests cover the allocator
+  and size-curve interpolation.
+- **Decode throughput benchmark** (`examples/decode_bench.rs`): decodes an
+  `.ascf` through the exact player codec path with zero display I/O. At
+  cols=240 the tag-7 (quarter-pel, worst case) drone 60 fps sample decodes
+  at ~950 fps — 15× the 60 fps display rate — so the 6-tap interpolation is
+  nowhere near a decode bottleneck. The evidence tool for the "decode stays
+  real-time on 60 fps footage" claim.
+- **Quarter-pel visual A/B** (`experiments/make_qpel_ab.sh` →
+  `samples/evidence/drone_qpel_ab.gif`/`.mp4`): side-by-side tag 6 vs tag 7
+  on the drone pan, so the +0.08 dB PSNR-Y difference can be judged with
+  the eye (it is imperceptible at GIF scale; tag 7 stays the default per
+  the strict-superset reasoning).
 - **Half-pixel motion compensation (tag 6)** for the lossy DCT profile —
   superseded as the default by tag 7 (quarter-pel) in the same release, still
   selectable with `--no-qpel`: the motion search refines the best integer

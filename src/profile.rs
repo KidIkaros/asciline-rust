@@ -414,6 +414,33 @@ pub struct ProfileEncoder {
     /// `asciline-compile --no-quality` turns it off to truly skip it — the
     /// wire output is unaffected either way.
     pub collect_stats: bool,
+    /// Rate control (`asciline-compile --target-size`): per-keyframe QF
+    /// schedule. When set, keyframe `k` (in emission order) is encoded with
+    /// `schedule[k]` instead of `qf`, and the inter frames that follow it
+    /// inherit that QF until the next keyframe. Wire-compatible: keyframes
+    /// already self-describe their QF (`payload[1]`), so each GOP simply
+    /// carries its own quant tables and any decoder plays the stream.
+    pub qf_schedule: Option<Vec<u8>>,
+    /// Rate control: frame indices that MUST be keyframes, in addition to the
+    /// every-48 schedule. Used to reproduce a probe pass's scene-cut grid
+    /// exactly across rate-control passes (a changed QF changes the
+    /// reconstruction, which would otherwise shift scene-cut positions and
+    /// desync the QF schedule). When set, scene-cut detection is suppressed
+    /// so the grid — and therefore the schedule alignment — is stable.
+    pub force_keyframes: Option<Vec<u32>>,
+    /// Rate-control probe: when true, record every keyframe's frame index and
+    /// the wire size of each GOP (keyframe + its inter frames) so the CLI can
+    /// build a per-GOP QF schedule from a first pass. Off for normal compiles
+    /// (a couple of pushes per frame — negligible, but keep the default
+    /// library behavior identical).
+    pub probe: bool,
+    /// Keyframes emitted so far — the index into `qf_schedule`.
+    kf_count: u32,
+    /// Probe results (see `probe`): frame indices of keyframes this pass.
+    pub probe_keyframes: Vec<u32>,
+    /// Probe results: wire bytes per GOP (4-byte length prefix + message,
+    /// exactly what the container writes), aligned with `probe_keyframes`.
+    pub probe_gop_sizes: Vec<u64>,
     prev: Option<[Plane; 3]>,
     n: u32,
     /// Per-frame PSNR/SSIM of the lossy reconstruction vs the source.
@@ -453,6 +480,12 @@ impl ProfileEncoder {
             level,
             scene_cut_mad: 0.0, // disabled by default: bit-exact original behavior
             collect_stats: true,
+            qf_schedule: None,
+            force_keyframes: None,
+            probe: false,
+            kf_count: 0,
+            probe_keyframes: Vec::new(),
+            probe_gop_sizes: Vec::new(),
             prev: None,
             n: 0,
             stats: QualityStats::new(),
@@ -462,6 +495,9 @@ impl ProfileEncoder {
     pub fn reset(&mut self) {
         self.prev = None;
         self.n = 0;
+        self.kf_count = 0;
+        self.probe_keyframes.clear();
+        self.probe_gop_sizes.clear();
         self.stats = QualityStats::new();
     }
 
@@ -544,11 +580,34 @@ impl ProfileEncoder {
         // Scene-cut detection: if the luma barely resembles the previous
         // reconstruction, motion prediction is worthless — re-encode the frame
         // as a fresh keyframe (self-describing, so every decoder handles it).
-        if ftype == 1 && self.scene_cut_mad > 0.0 {
+        // Suppressed when a force-keyframe grid is in effect (rate control
+        // reproduces a probe pass's grid exactly, so the QF schedule stays
+        // aligned — an extra scene-cut keyframe would shift every subsequent
+        // schedule entry).
+        if ftype == 1 && self.force_keyframes.is_none() && self.scene_cut_mad > 0.0 {
             let prev_y = &self.prev.as_ref().unwrap()[0].buf;
             if mad(&y, prev_y) > self.scene_cut_mad {
                 ftype = 0;
             }
+        }
+        // Rate control: force the probe pass's keyframe grid.
+        if ftype == 1 {
+            if let Some(force) = &self.force_keyframes {
+                if force.binary_search(&self.n).is_ok() {
+                    ftype = 0;
+                }
+            }
+        }
+        // Rate control: keyframe `k` encodes with `qf_schedule[k]` (falling
+        // back to `qf` when the schedule is shorter), and the inter frames
+        // that follow keep that QF until the next keyframe.
+        if ftype == 0 {
+            if let Some(sched) = &self.qf_schedule {
+                if let Some(&q) = sched.get(self.kf_count as usize) {
+                    self.qf = q.clamp(1, 100);
+                }
+            }
+            self.kf_count += 1;
         }
 
         let (ql, qc) = qtables(self.qf as i64);
@@ -642,6 +701,19 @@ impl ProfileEncoder {
             TAG_PROFILE
         });
         msg.extend_from_slice(&z);
+
+        // Rate-control probe: record this GOP's wire size. The container
+        // writes a 4-byte length prefix before each message, so account it
+        // exactly as the file will.
+        if self.probe {
+            let sz = (msg.len() as u64) + 4;
+            if ftype == 0 {
+                self.probe_keyframes.push(self.n);
+                self.probe_gop_sizes.push(sz);
+            } else if let Some(g) = self.probe_gop_sizes.last_mut() {
+                *g += sz;
+            }
+        }
 
         self.prev = Some(recons);
 

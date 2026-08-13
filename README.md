@@ -349,6 +349,28 @@ quality-metric definitions, and reproduction methodology.
 | [`samples/evidence/cartoon_difference.mp4`](samples/evidence/cartoon_difference.mp4) | source, profile, and explicitly 4× amplified difference panels |
 | [`samples/evidence/cartoon_wire_120fps.mp4`](samples/evidence/cartoon_wire_120fps.mp4) | actual WebSocket wire frames from 60 fps cartoon content, useful as a transport illustration |
 
+### Real 60 fps footage (drone flight)
+
+The cartoon is 30 fps, so it cannot *show* faster-than-30 playback. For that,
+the evidence uses a genuine **720p60 drone flight** (CC BY 3.0, ~482 unique
+hashes across 480 decoded frames — real aerial motion, not duplicated frames).
+It is compiled and rendered at its native **60 fps** (`--fps 60`, because the
+offline compiler otherwise keeps the original's >30 fps decimation default):
+
+<img src="samples/evidence/drone_compare.gif" width="960" alt="60 fps drone flight source, lossless pixel, and lossy profile comparison"/>
+
+Every panel is labeled **clip 60 fps**, and the full-resolution MP4 is
+[`samples/evidence/drone_compare.mp4`](samples/evidence/drone_compare.mp4)
+(1440×288, 60 fps, 480 frames). Profile-only playback at 60 fps:
+
+<img src="samples/evidence/drone_profile.gif" width="560" alt="60 fps drone flight profile-only playback"/>
+
+On this 8-second, 480-frame clip the lossy profile is **10.1 MB lossless pixel
+→ 233 KB (~44× smaller)** at **PSNR-Y 37.86 dB / SSIM-Y 0.9464** (worst frame
+#240, PSNR-Y 35.05 dB). Full report:
+[`samples/drone_profile_quality.txt`](samples/drone_profile_quality.txt).
+Attribution and checksums are in [`samples/SOURCE.md`](samples/SOURCE.md).
+
 ### Unique-frame throughput proof
 
 The visual and numerical proof for the substantial FPS claim is separate from

@@ -209,7 +209,10 @@ jobs:
             samples/source/big_buck_bunny_excerpt_30fps.mp4; \
             printf '%s  %s\n' \
             '1cf8e47cdef1c3acb4cab994a463a0ca6dabe1532bc89f09f90873dae45e98e8' \
-            samples/source/big_buck_bunny_excerpt_60fps.mp4)
+            samples/source/big_buck_bunny_excerpt_60fps.mp4; \
+            printf '%s  %s\n' \
+            '0799500294387e7c60f9fe611cdddc611c6c30d9171d63c9d3f399385781d208' \
+            samples/source/drone_excerpt_720p60.mp4)
           test ! -e samples/mandelbrot_profile.ascf
           test ! -e samples/evidence/stream_120fps.mp4
           for f in \
@@ -218,7 +221,9 @@ jobs:
             samples/evidence/cartoon_difference.gif \
             samples/evidence/cartoon_source_profile_large.gif \
             samples/evidence/cartoon_detail_compare.gif \
-            samples/evidence/throughput_120fps.gif; do
+            samples/evidence/throughput_120fps.gif \
+            samples/evidence/drone_compare.gif \
+            samples/evidence/drone_profile.gif; do
             test -f "$f"
             test "$(stat -c %s "$f")" -lt 10000000
           done
@@ -228,6 +233,12 @@ jobs:
           test "$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 samples/evidence/cartoon_compare.mp4)" = '30/1'
           test "$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 samples/evidence/cartoon_wire_120fps.mp4)" = '120/1'
           test "$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 samples/evidence/throughput_120fps.mp4)" = '120/1'
+          test "$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 samples/evidence/drone_compare.mp4)" = '60/1'
+          test "$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 samples/evidence/drone_profile.mp4)" = '60/1'
+          test -f samples/drone_profile_quality.txt
+          grep -q 'PSNR-Y' samples/drone_profile_quality.txt
+          test -f samples/drone_pixel.ascf
+          test -f samples/drone_profile.ascf
           test -f samples/big_buck_bunny_speed_analysis.md
           grep -q 'Compile FPS' samples/big_buck_bunny_speed_analysis.md
           test -f samples/evidence/player_display_benchmark.md

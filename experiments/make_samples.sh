@@ -21,8 +21,11 @@ SOURCE30=samples/source/big_buck_bunny_excerpt_30fps.mp4
 SOURCE60=samples/source/big_buck_bunny_excerpt_60fps.mp4
 SHA30=8f113ef593688f47ec8d8b0d093fb955cb04bc350826c775d2e9ca451870856e
 SHA60=1cf8e47cdef1c3acb4cab994a463a0ca6dabe1532bc89f09f90873dae45e98e8
+DRONE60=samples/source/drone_excerpt_720p60.mp4
+DRONE_SHA=0799500294387e7c60f9fe611cdddc611c6c30d9171d63c9d3f399385781d208
 [[ "$(sha256sum "$SOURCE30" | awk '{print $1}')" == "$SHA30" ]]
 [[ "$(sha256sum "$SOURCE60" | awk '{print $1}')" == "$SHA60" ]]
+[[ "$(sha256sum "$DRONE60" | awk '{print $1}')" == "$DRONE_SHA" ]]
 SOURCE_FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate \
     -of csv=p=0 "$SOURCE30" | awk -F/ '{printf "%.0f", $1 / $2}')
 
@@ -177,6 +180,71 @@ ffmpeg -y -v error -i samples/evidence/cartoon_difference.mp4 -i "$TMP/diff_pale
     -lavfi 'fps=10,scale=800:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a' -loop 0 \
     samples/evidence/cartoon_difference.gif
 
+# ── genuine 60 fps real-world footage (drone flight, CC BY 3.0) ──
+# The cartoon is only 30/60 fps; to *show* the pipeline handling >30 fps real
+# content this pins a real 720p60 aerial clip and compiles it at native 60 fps
+# (--fps 60, because the offline compiler otherwise keeps the original's >30
+# fps decimation default).
+DRONE_FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate \
+    -of csv=p=0 "$DRONE60" | awk -F/ '{printf "%.0f", $1 / $2}')
+
+"$BIN" "$DRONE60" --cols 240 --pixel --fps "$DRONE_FPS" --out "$TMP/drone_pixel" >/dev/null
+"$BIN" "$DRONE60" --cols 240 --profile --qf 70 --fps "$DRONE_FPS" --out "$TMP/drone_profile" \
+    > "$TMP/drone_profile_report.txt" 2>&1
+DRONE_PROFILE="$TMP/drone_profile.ascf"
+DRONE_REPORT="$TMP/drone_profile_report.txt"
+
+# stills: the same frame across source / pixel / profile
+DFRAME=180
+ffmpeg -y -v error -ss 3 -i "$DRONE60" -frames:v 1 samples/images/drone_source.png
+"$RENDER" "$TMP/drone_pixel.ascf" --out "$TMP/r_drone_pixel" --scale 2 --frame "$DFRAME" >/dev/null
+"$RENDER" "$DRONE_PROFILE" --out "$TMP/r_drone_profile" --scale 2 --frame "$DFRAME" >/dev/null
+ffmpeg -y -v error -i "$TMP/r_drone_pixel/frame_000180.ppm" samples/images/drone_pixel.png
+ffmpeg -y -v error -i "$TMP/r_drone_profile/frame_000180.ppm" samples/images/drone_profile.png
+grep -A8 '\[Quality\]' "$DRONE_REPORT" > samples/drone_profile_quality.txt || true
+cp "$TMP/drone_pixel.ascf" samples/drone_pixel.ascf
+cp "$DRONE_PROFILE" samples/drone_profile.ascf
+
+# render every decoded frame for the synchronized 60 fps comparison
+"$RENDER" "$TMP/drone_pixel.ascf" --out "$TMP/r_drone_pixel_all" --scale 2 >/dev/null
+"$RENDER" "$DRONE_PROFILE" --out "$TMP/r_drone_profile_all" --scale 2 >/dev/null
+ffmpeg -y -v error -i "$DRONE60" -vf scale=480:270 -start_number 0 "$TMP/drone_src_%06d.ppm"
+
+DRONE_PSNR=$(grep 'PSNR-Y' "$DRONE_REPORT" | head -1 | awk '{print $3}')
+DRONE_PROFILE_SIZE=$(stat -c %s "$DRONE_PROFILE")
+DRONE_PIXEL_SIZE=$(stat -c %s "$TMP/drone_pixel.ascf")
+DRONE_RATIO=$(python3 - "$DRONE_PIXEL_SIZE" "$DRONE_PROFILE_SIZE" <<'PY'
+import sys
+print(f"{int(sys.argv[1]) / int(sys.argv[2]):.1f}")
+PY
+)
+DRONE_FILTER="\
+[0:v]pad=480:288:0:9:black,drawtext=$LBL:text='SOURCE  Drone flight  |  clip ${DRONE_FPS} fps':x=10:y=10[a];\
+[1:v]pad=480:288:0:9:black,drawtext=$LBL:text='PIXEL  lossless adaptive  |  clip ${DRONE_FPS} fps':x=10:y=10[b];\
+[2:v]drawtext=$LBL:text='PROFILE  QF=70  |  clip ${DRONE_FPS} fps  |  PSNR-Y ${DRONE_PSNR} dB  |  ${DRONE_RATIO}x smaller':x=10:y=10[c];\
+[a][b][c]hstack=3,drawtext=$LBL:text='Drone flight  |  synchronized clip ${DRONE_FPS} fps  |  GIF preview 10 fps':x=12:y=h-38[v]"
+ffmpeg -y -v error \
+    -framerate "$DRONE_FPS" -i "$TMP/drone_src_%06d.ppm" \
+    -framerate "$DRONE_FPS" -i "$TMP/r_drone_pixel_all/frame_%06d.ppm" \
+    -framerate "$DRONE_FPS" -i "$TMP/r_drone_profile_all/frame_%06d.ppm" \
+    -filter_complex "$DRONE_FILTER" -map '[v]' -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
+    samples/evidence/drone_compare.mp4
+ffmpeg -y -v error -i samples/evidence/drone_compare.mp4 \
+    -vf 'fps=10,scale=800:-1:flags=lanczos,palettegen=stats_mode=diff' "$TMP/drone_palette.png"
+ffmpeg -y -v error -i samples/evidence/drone_compare.mp4 -i "$TMP/drone_palette.png" \
+    -lavfi 'fps=10,scale=800:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a' -loop 0 \
+    samples/evidence/drone_compare.gif
+
+# profile-only playback at native 60 fps
+ffmpeg -y -v error -framerate "$DRONE_FPS" -i "$TMP/r_drone_profile_all/frame_%06d.ppm" \
+    -vf "drawtext=$LBL:text='PROFILE  QF=70  |  clip ${DRONE_FPS} fps  |  ${DRONE_RATIO}x smaller  |  PSNR-Y ${DRONE_PSNR} dB':x=10:y=10" \
+    -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p samples/evidence/drone_profile.mp4
+ffmpeg -y -v error -i samples/evidence/drone_profile.mp4 \
+    -vf 'fps=10,scale=560:-1:flags=lanczos,palettegen=stats_mode=diff' "$TMP/drone_profile_palette.png"
+ffmpeg -y -v error -i samples/evidence/drone_profile.mp4 -i "$TMP/drone_profile_palette.png" \
+    -lavfi 'fps=10,scale=560:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a' -loop 0 \
+    samples/evidence/drone_profile.gif
+
 # ── real 60fps cartoon source over the 120fps server wire path ──
 PORT=$(shuf -i 20000-30000 -n 1)
 "$SERVER" "$SOURCE60" --fps 120 --cols 240 --pixel --port "$PORT" --no-thumbnails >/dev/null 2>&1 &
@@ -209,8 +277,13 @@ ffmpeg -y -v error -framerate 120 -i "$TMP/r_live/frame_%06d.ppm" \
 cat > samples/SOURCE.md <<'EOF'
 # Evidence source and attribution
 
-The visual evidence uses an 8-second excerpt of **Big Buck Bunny**, the Blender
-Foundation animated short, rather than a synthetic test pattern.
+The visual evidence uses two committed, pinned, Creative-Commons-licensed
+sources rather than synthetic test patterns.
+
+## 1. Big Buck Bunny (visual quality, 30/60 fps cartoon)
+
+An 8-second excerpt of **Big Buck Bunny**, the Blender Foundation animated
+short.
 
 - Official project: <https://peach.blender.org/>
 - Official downloads: <https://download.blender.org/peach/bigbuckbunny_movies/>
@@ -220,12 +293,28 @@ Foundation animated short, rather than a synthetic test pattern.
   the 60-fps excerpt is approximately 00:01:00–00:01:04 from the official
   1080p 60-fps release, resized to 640×360.
 
-The committed source excerpts are lossless H.264 intermediates created from the
-official downloads. Their hashes are checked by `experiments/make_samples.sh`:
+## 2. Drone flight (real 60 fps aerial footage)
+
+An 8-second 720p60 excerpt of **Family Christmas Drone Flight 4k 60FPS
+Nashville, Michigan**, a genuine 59.94/60 fps aerial clip used to demonstrate
+that real-world content above 30 fps is compiled and displayed at native rate.
+
+- File page: <https://commons.wikimedia.org/wiki/File:Family_Christmas_Drone_Flight_4k_60FPS_Nashville,_Michigan.webm>
+- License: Creative Commons Attribution 3.0 Unported (CC BY 3.0)
+- Attribution: Joseph Challender (drone footage)
+- Excerpt: approximately 00:01:30–00:01:38 from the original 4K 59.94 fps
+  source, trimmed and resized to 1280×720 at 60 fps with a near-lossless
+  H.264 intermediate. `framemd5` confirms ~482 of 480 decoded frames are
+  unique, i.e. genuine motion rather than duplicated frames.
+
+The committed source excerpts are lossless/near-lossless H.264 intermediates
+created from the official downloads. Their hashes are checked by
+`experiments/make_samples.sh`:
 
 ```text
 8f113ef593688f47ec8d8b0d093fb955cb04bc350826c775d2e9ca451870856e  big_buck_bunny_excerpt_30fps.mp4
 1cf8e47cdef1c3acb4cab994a463a0ca6dabe1532bc89f09f90873dae45e98e8  big_buck_bunny_excerpt_60fps.mp4
+0799500294387e7c60f9fe611cdddc611c6c30d9171d63c9d3f399385781d208  drone_excerpt_720p60.mp4
 ```
 EOF
 

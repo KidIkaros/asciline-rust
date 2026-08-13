@@ -8,3 +8,6 @@ experiments/vectors_profile_rust.bin
 experiments/gen_python.log
 *.ascf
 *.mp3
+# cargo-fuzz outputs (fuzz/corpus/ seeds ARE committed)
+fuzz/artifacts
+fuzz/target

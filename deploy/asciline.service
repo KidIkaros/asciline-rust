@@ -1,0 +1,42 @@
+# asciline-server — systemd unit (bare-metal deployment).
+#
+# Setup (see DEPLOYMENT.md):
+#   sudo useradd --system --create-home --shell /usr/sbin/nologin asciline
+#   sudo mkdir -p /var/lib/asciline/videos /etc/asciline
+#   sudo chown -R asciline:asciline /var/lib/asciline
+#   echo 'ASCILINE_TOKEN=change-me' | sudo tee /etc/asciline/env   # optional
+#   sudo chmod 600 /etc/asciline/env
+#   sudo install -m 0644 deploy/asciline.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now asciline
+
+[Unit]
+Description=ASCILINE ASCII video streaming server
+Documentation=https://github.com/KidIkaros/asciline-rust
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=asciline
+Group=asciline
+# Optional ASCILINE_TOKEN=… (600 perms). Also set RUST_LOG here if wanted.
+EnvironmentFile=-/etc/asciline/env
+Environment=RUST_LOG=info
+ExecStart=/usr/local/bin/asciline-server --folder /var/lib/asciline/videos \
+    --host 127.0.0.1 --port 8765 --cols 200 --loop --max-clients 8
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+
+# ── sandboxing (all supported on systemd ≥ 240) ──
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+# The media folder is the only writable path (no on-disk state otherwise).
+ReadWritePaths=/var/lib/asciline
+
+[Install]
+WantedBy=multi-user.target

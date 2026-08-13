@@ -30,15 +30,19 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "tokio"] }
 futures-util = "0.3"
 
-# Compression (zlib) - zlib-rs backend: pure Rust (no C deps), ~2x faster
-# deflate than the default miniz_oxide and memory-safe (Cloudflare).
-flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+# Compression (zlib) — flate2's default pure-Rust miniz_oxide backend.
+# Measured on real clips (experiments/compare_zlib_backends.sh): miniz_oxide
+# produces ~23% smaller .ascf files than zlib-rs on the adaptive pixel path at
+# the same compression level (the profile path is a wash), while zlib-rs's
+# speed edge was marginal and reversed on the profile path. Size wins for a
+# codec container. Both backends are pure Rust; swap via that script.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 # Parallelism for the frame mapper
 rayon = "1"
 
 # CLI + serialization
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

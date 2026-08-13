@@ -101,7 +101,9 @@ struct Args {
     /// Optional shared secret: when set, /ws, /audio and /scrub* require
     /// `?token=<secret>`. Note the original browser client does not send one,
     /// so the token must be appended to the URL (see README security section).
-    #[arg(long)]
+    /// Also settable via the ASCILINE_TOKEN environment variable (systemd
+    /// EnvironmentFile / docker-compose `environment:`).
+    #[arg(long, env = "ASCILINE_TOKEN", hide_env_values = true)]
     token: Option<String>,
 }
 

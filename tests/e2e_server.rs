@@ -3,86 +3,15 @@
 //! (`/ws?codec=adaptive`), verifies the INIT handshake and that binary frames
 //! decode to the advertised grid size, and checks the root page + static assets.
 
-use std::io::{Read, Write};
-use std::process::Stdio;
+mod common;
+
 use std::time::Duration;
 
 use asciline::codec::CodecDecoder;
+use common::{free_port, http_get, make_test_video, spawn_server, wait_for_server};
 use futures_util::StreamExt;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
-
-fn ffmpeg_available() -> bool {
-    std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Create a test video. `tag` distinguishes concurrent tests: they share a
-/// process but each needs its own temp file (one test's cleanup must not
-/// delete the other's while its server is still probing it).
-fn make_test_video(tag: &str) -> Option<std::path::PathBuf> {
-    if !ffmpeg_available() {
-        return None;
-    }
-    let path =
-        std::env::temp_dir().join(format!("asciline_e2e_{}_{}.mp4", std::process::id(), tag));
-    let status = std::process::Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=320x180:rate=30:duration=1",
-            "-pix_fmt",
-            "yuv420p",
-        ])
-        .arg(&path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()?;
-    status.success().then_some(path)
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-async fn wait_for_server(port: u16) {
-    for _ in 0..100 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok()
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("server did not come up on port {port}");
-}
-
-/// Minimal HTTP GET over a raw TCP socket (no extra deps).
-fn http_get(port: u16, path: &str) -> String {
-    let mut sock = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    write!(
-        sock,
-        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
-    let mut resp = String::new();
-    let _ = sock.read_to_string(&mut resp);
-    resp
-}
 
 #[tokio::test]
 async fn ws_stream_protocol() {
@@ -92,24 +21,7 @@ async fn ws_stream_protocol() {
     };
     let port = free_port();
 
-    let bin = env!("CARGO_BIN_EXE_asciline-server");
-    let mut child = tokio::process::Command::new(bin)
-        .arg(video.to_str().unwrap())
-        .args([
-            "--mode",
-            "6",
-            "--cols",
-            "80",
-            "--fps",
-            "30",
-            "--no-thumbnails",
-        ])
-        .arg("--port")
-        .arg(port.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn asciline-server");
+    let mut child = spawn_server(video.to_str().unwrap(), port, &["--cols", "80"]);
 
     wait_for_server(port).await;
 
@@ -187,32 +99,20 @@ async fn hardening_guards() {
         return;
     };
     let port = free_port();
-    let bin = env!("CARGO_BIN_EXE_asciline-server");
-    let mut child = tokio::process::Command::new(bin)
-        .arg(video.to_str().unwrap())
-        .args([
-            "--mode",
-            "6",
+    let mut child = spawn_server(
+        video.to_str().unwrap(),
+        port,
+        &[
             "--cols",
             "40",
-            "--fps",
-            "30",
-            "--no-thumbnails",
-        ])
-        .arg("--port")
-        .arg(port.to_string())
-        .args([
             "--max-clients",
             "1",
             "--token",
             "s3cr3t",
             "--max-ffmpeg",
             "2",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn asciline-server");
+        ],
+    );
 
     wait_for_server(port).await;
 

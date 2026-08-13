@@ -1,0 +1,25 @@
+# asciline-server — Caddy TLS reverse proxy.
+# Replace asciline.example.com with your domain, point DNS at this host,
+# and run:  caddy run --config deploy/Caddyfile
+#
+# WebSocket upgrades are proxied automatically by reverse_proxy.
+# The app should stay bound to 127.0.0.1:8765 (see DEPLOYMENT.md).
+
+asciline.example.com {
+    encode zstd gzip
+
+    reverse_proxy 127.0.0.1:8765 {
+        # Stream audio/thumbnails without buffering (WebSocket is handled
+        # automatically, but long audio GETs should stream too).
+        flush_interval -1
+    }
+
+    # Optional: rate-limit connections to the streaming endpoint.
+    # rate_limit {
+    #     zone dynamic {
+    #         key {remote_host}
+    #         events 60
+    #         window 1m
+    #     }
+    # }
+}

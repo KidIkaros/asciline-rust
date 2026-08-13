@@ -1,0 +1,37 @@
+# asciline-server — Docker Compose deployment.
+# Copy .env.example to .env and edit the values, then `docker compose up -d`.
+#
+# The container binds to 127.0.0.1 ONLY — put Caddy (deploy/Caddyfile) or any
+# TLS-terminating proxy in front for public access.
+
+services:
+  asciline:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: asciline:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8000"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      # Optional auth: clients then connect to https://host/?token=SECRET.
+      # Leave unset for localhost-only deployments.
+      ASCILINE_TOKEN: ${ASCILINE_TOKEN:-}
+    volumes:
+      - ./videos:/srv/asciline/videos
+    # ENTRYPOINT already adds --host 0.0.0.0; tune the rest here.
+    command:
+      - --folder
+      - /srv/asciline/videos
+      - --cols
+      - "200"
+      - --loop
+      - --max-clients
+      - "8"
+    # HEALTHCHECK comes from the Dockerfile (/healthz).
+    healthcheck:
+      disable: false
+    # Keep ffmpeg's memory/CPU within bounds on shared hosts.
+    mem_limit: 1g
+    pids_limit: 128

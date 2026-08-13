@@ -38,8 +38,10 @@ jobs:
           cp README.md                      dist/asciline-${TAG}-linux-x86_64/
           cp LICENSE                        dist/asciline-${TAG}-linux-x86_64/
           cp NOTICE                         dist/asciline-${TAG}-linux-x86_64/
+          cp DEPLOYMENT.md                  dist/asciline-${TAG}-linux-x86_64/
           cp install.sh                     dist/asciline-${TAG}-linux-x86_64/
           cp -r web                         dist/asciline-${TAG}-linux-x86_64/web
+          cp -r deploy                      dist/asciline-${TAG}-linux-x86_64/deploy
           cd dist
           tar czf asciline-${TAG}-linux-x86_64.tar.gz asciline-${TAG}-linux-x86_64/
           sha256sum asciline-${TAG}-linux-x86_64.tar.gz > checksums.txt

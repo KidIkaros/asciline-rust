@@ -8,6 +8,40 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
 
 ### Added
 
+- `tests/load_server.rs` — a real-binary concurrent load test proving
+  `--max-clients` under contention (both in-cap clients stream, `/healthz`
+  reports the exact in-use count, the overflow connection is rejected, and a
+  freed slot is reusable). Shared server-test helpers now live in
+  `tests/common/mod.rs`.
+- A `fuzz/` crate with four libFuzzer targets (`parse_ascf`, `adaptive_decode`,
+  `profile_decode`, `ascf_stream`) mirroring the proptest harness's
+  no-panic-on-any-input guarantee with a mutation engine, plus a committed
+  seed corpus (`fuzz/corpus`, regenerable via `experiments/make_fuzz_corpus.sh`)
+  carrying real tag-4 / adaptive wire records so the deep decoder paths are
+  reachable. A nightly `cargo-fuzz` smoke job (build + 45 s per target) runs
+  in CI.
+- `DEPLOYMENT.md` and `deploy/` — production deployment kit: a systemd unit
+  (`asciline.service`), Docker Compose (`.env.example`, healthcheck, looped
+  folder mode), and a Caddy TLS reverse-proxy config. The `deploy/` tree and
+  `DEPLOYMENT.md` are shipped inside every release tarball.
+- `--token` now also reads `ASCILINE_TOKEN` from the environment (clap `env`),
+  so systemd `EnvironmentFile=` and compose `environment:` can inject the
+  secret without shell expansion.
+- `experiments/compare_zlib_backends.sh` — reproducible zlib-backend
+  measurement.
+
+### Changed
+
+- Default zlib backend is now flate2's `miniz_oxide` instead of `zlib-rs`.
+  Measured on real clips at the same compression level: miniz_oxide produces
+  ~23% smaller `.ascf` files on the adaptive pixel path (2,875,260 B vs
+  3,536,211 B on an 8 s 640x360 clip at 240 cols), the profile path is a
+  wash, and zlib-rs's speed edge was marginal/reversed — size wins for a
+  codec container. Both remain pure Rust; `experiments/compare_zlib_backends.sh`
+  can re-measure either backend.
+
+### Added
+
 - GitHub Actions CI (`fmt`/`clippy -D warnings`/`cargo test`, the committed
   bit-exact differential harnesses, the e2e server test, the
   `--quality-threshold` gate smoke test, `cargo-audit`) and a tag-driven

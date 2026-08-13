@@ -89,6 +89,43 @@ jobs:
       - name: Release build
         run: cargo build --release
 
+  fuzz:
+    name: Fuzz smoke (nightly, cargo-fuzz)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install nightly toolchain + cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal --component rust-src
+          cargo install cargo-fuzz --locked || cargo install cargo-fuzz
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build all fuzz targets
+        run: cargo +nightly fuzz build
+
+      - name: Smoke-fuzz each target (45 s each)
+        # The committed corpus (fuzz/corpus) carries real tag-4 / adaptive
+        # wire records; libFuzzer perturbs them into the deep decoder paths.
+        # A crash here fails the build — same guarantee as the proptest
+        # harness, but with libFuzzer's mutation engine.
+        run: |
+          for t in fuzz_parse_ascf fuzz_adaptive_decode fuzz_profile_decode fuzz_ascf_stream; do
+            echo "=== $t ==="
+            timeout 75 cargo +nightly fuzz run "$t" -- -max_total_time=45 2>&1 \
+              | grep -E 'Done|NEW|crash|ERROR|SUMMARY|Test unit written' | tail -3
+          done
+
+      - name: Fail if any crash was found
+        run: |
+          if ls fuzz/artifacts/* 2>/dev/null | grep -v README; then
+            echo "::error::libFuzzer found crashes in fuzz/artifacts/"
+            exit 1
+          fi
+          echo "no crashes"
+
   security-audit:
     name: Security audit (cargo-audit)
     runs-on: ubuntu-latest

@@ -28,6 +28,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
   `codec.py` is now vendored unmodified at `experiments/vendor/` (pinned
   commit, see NOTICE), so the generators run hermetically with only numpy and
   CI regenerates + compares the vectors byte-for-byte, failing on drift.
+- `asciline-render` — a headless `.ascf` → PPM frame renderer (pixel mode =
+  coloured blocks, ASCII mode = palette characters in a public-domain 8×8
+  bitmap font) that turns compiled clips into images/video via ffmpeg.
+- `samples/` — committed format evidence mirroring the original project's
+  demo stills: a 6 s mandelbrot clip compiled in all three formats (ASCII
+  mode / pixel mode / `--profile`) with decoded-frame comparison images, an
+  animated GIF, the playable `.ascf` files, and the profile quality report
+  (2.7 MB lossless pixel → 157 KB at PSNR-Y 36.35 dB / SSIM-Y 0.972).
+  Regenerate with `experiments/make_samples.sh`.
 - `DEPLOYMENT.md` and `deploy/` — production deployment kit: a systemd unit
   (`asciline.service`), Docker Compose (`.env.example`, healthcheck, looped
   folder mode), and a Caddy TLS reverse-proxy config. The `deploy/` tree and

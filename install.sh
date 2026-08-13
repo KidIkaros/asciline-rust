@@ -2,9 +2,9 @@
 #
 # asciline-rust install script
 #
-#   Builds the three release binaries (asciline-server, asciline-player,
-#   asciline-compile) with cargo and installs them to ~/.local/bin
-#   (override with PREFIX=/usr PREFIX=~/.cargo ...).
+#   Builds the four release binaries (asciline-server, asciline-player,
+#   asciline-compile, asciline-render) with cargo and installs them to
+#   ~/.local/bin (override with PREFIX=/usr PREFIX=~/.cargo ...).
 #
 # Requirements: cargo (Rust 1.87+) and ffmpeg + ffprobe on PATH.
 #
@@ -27,7 +27,7 @@ echo "==> Building release binaries (this can take a few minutes)..."
 cargo build --release
 
 mkdir -p "$BIN_DIR"
-for bin in asciline-server asciline-player asciline-compile; do
+for bin in asciline-server asciline-player asciline-compile asciline-render; do
     install -m 0755 "target/release/$bin" "$BIN_DIR/$bin"
     echo "    installed $BIN_DIR/$bin"
 done

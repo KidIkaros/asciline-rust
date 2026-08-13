@@ -35,6 +35,7 @@ jobs:
           cp target/release/asciline-server  dist/asciline-${TAG}-linux-x86_64/
           cp target/release/asciline-player  dist/asciline-${TAG}-linux-x86_64/
           cp target/release/asciline-compile dist/asciline-${TAG}-linux-x86_64/
+          cp target/release/asciline-render  dist/asciline-${TAG}-linux-x86_64/
           cp README.md                      dist/asciline-${TAG}-linux-x86_64/
           cp LICENSE                        dist/asciline-${TAG}-linux-x86_64/
           cp NOTICE                         dist/asciline-${TAG}-linux-x86_64/
@@ -48,6 +49,7 @@ jobs:
           sha256sum asciline-${TAG}-linux-x86_64/asciline-server >> checksums.txt
           sha256sum asciline-${TAG}-linux-x86_64/asciline-player >> checksums.txt
           sha256sum asciline-${TAG}-linux-x86_64/asciline-compile >> checksums.txt
+          sha256sum asciline-${TAG}-linux-x86_64/asciline-render >> checksums.txt
           GIT_COMMIT=$(git rev-parse --short HEAD)
           cat > BUILD_INFO.txt << EOF
           ASCILINE Rust Release ${TAG}

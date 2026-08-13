@@ -129,7 +129,7 @@ cores, down with memory pressure. Monitor `/healthz` `in_use`/`max` and the
 
 ## Upgrades & rollback
 
-Releases are tagged `v*`; each tag carries a tarball with the three binaries,
+Releases are tagged `v*`; each tag carries a tarball with the four binaries,
 `web/`, checksums, and `BUILD_INFO.txt`. Rollback = reinstall the previous
 tarball's binaries (config lives outside the binary). The `.ascf` files
 produced by the compiler are forward/backward compatible across the 0.x

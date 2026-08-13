@@ -38,7 +38,7 @@ and the map+encode stage alone runs at a **~3,600 fps ceiling** at 240×67
 
 ```bash
 cargo build --release
-# binaries: target/release/asciline-server  asciline-player  asciline-compile
+# binaries: target/release/asciline-server  asciline-player  asciline-compile  asciline-render
 ```
 
 ## 1. Streaming server (drop-in for `stream_server.py`)
@@ -115,6 +115,10 @@ rewrite), run-length-compressed `38;2;r;g;b` escapes, aspect-correct auto-fit
 (`CHAR_RATIO 0.45`), palette + quantize options.
 
 ## 3. Compiler (`compiler.py`)
+
+Also shipped: **`asciline-render`** — headless `.ascf` → PPM frame renderer
+(pixel blocks / ASCII glyphs) for turning compiled clips into images and video:
+`asciline-render clip.ascf --out frames && ffmpeg -framerate 30 -i frames/frame_%06d.ppm out.mp4`.
 
 ```bash
 asciline-compile your_video.mp4 --cols 250 --pixel --quantize 2
@@ -239,6 +243,44 @@ runs numpy/BLAS, so on rare rounding or tie boundaries it may select slightly
 different coefficients or motion vectors than the Python encoder. Both streams
 are valid and decode identically on every ASCILINE decoder — compatibility is
 in the bit-exact decode direction, which is what the tests verify.
+
+## Sample clips — format evidence
+
+The original project demonstrates its output with stills; here is the same
+comparison for this port, rendered **by our own decoders**: `asciline-render`
+headlessly rasterizes the compiled `.ascf` (pixel mode = coloured blocks, ASCII
+mode = the palette characters in an 8×8 bitmap font) straight from the codec
+frames a player would decode. Source: a synthetic 6 s, 640×360 mandelbrot zoom
+(lossless FFV1, deterministic).
+
+| Output | Format | File | Size |
+| :--- | :--- | :--- | ---: |
+| <img src="samples/images/source.png" width="400" alt="Source frame"/> | original source frame | — | 300 KB |
+| <img src="samples/images/ascii.png" width="400" alt="ASCII mode"/> | ASCII mode (mode 4, adaptive lossless) | `samples/mandelbrot_ascii.ascf` | 1.0 MB |
+| <img src="samples/images/pixel.png" width="400" alt="PIXEL mode"/> | PIXEL mode (lossless adaptive) | `samples/mandelbrot_pixel.ascf` | 2.7 MB |
+| <img src="samples/images/prof.png" width="400" alt="--profile lossy DCT"/> | `--profile` lossy DCT, QF=70 | `samples/mandelbrot_profile.ascf` | **157 KB** |
+
+Animated (pixel mode, the lossless format):
+<img src="samples/images/pixel.gif" width="200" alt="PIXEL mode animation"/>
+
+Play the samples yourself:
+
+```sh
+asciline-player samples/mandelbrot_profile.ascf   # terminal player
+asciline-render samples/mandelbrot_profile.ascf --out frames \
+  && ffmpeg -framerate 30 -i frames/frame_%06d.ppm out.mp4
+# the original static_player/ and Studio IDE also open .ascf files
+```
+
+The `--profile` file is the headline: **2.7 MB → 157 KB (~17×)** for this 6 s
+clip, at a measured reconstruction quality of **PSNR-Y 36.35 dB / SSIM-Y 0.972**
+(see [`samples/mandelbrot_profile_quality.txt`](samples/mandelbrot_profile_quality.txt)
+for the full report, including the worst frame). The stills above are frame 60
+of each file — pixel and profile images are *decoded* frames, so what you see
+is exactly what `asciline-player` and the browser decoders render.
+
+The samples are committed; regenerate them anytime with
+`experiments/make_samples.sh`.
 
 ## Architecture
 

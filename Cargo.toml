@@ -24,6 +24,10 @@ path = "src/bin/player.rs"
 name = "asciline-compile"
 path = "src/bin/compile.rs"
 
+[[bin]]
+name = "asciline-render"
+path = "src/bin/render.rs"
+
 [dependencies]
 # Async runtime + web server
 tokio = { version = "1", features = ["full"] }
@@ -56,6 +60,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Terminal size probing
 crossterm = "0.28"
+
+# 8×8 bitmap glyphs for asciline-render's ASCII rasterization (public domain)
+font8x8 = "0.2"
 
 # Graceful Ctrl+C for the terminal player
 ctrlc = "3"

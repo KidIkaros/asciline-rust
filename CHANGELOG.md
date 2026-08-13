@@ -20,12 +20,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
 - `asciline-render --live`: a WebSocket capture mode that records the real
   wire frames `asciline-server` sends (INIT + every frame) and rasterizes
   them, turning a live stream into video — the basis for the 120 fps proof.
-- Real-video format evidence in `samples/evidence/`: `quality_compare.mp4`
-  (SOURCE | PIXEL | PROFILE side-by-side at 240 columns, 30 fps, PSNR burned
-  into each frame) and `stream_120fps.mp4` (720 frames captured live from a
-  120 fps source at a measured 111–116 fps — >60 fps, the claim a browser
-  capture cannot show), with the measurement logs in
-  `samples/evidence/stream_120fps.log`.
+- Replaced the synthetic Mandelbrot evidence with a recognizable, pinned
+  **Big Buck Bunny** cartoon excerpt (official Blender Foundation source,
+  CC BY 3.0, attribution/checksums in `samples/SOURCE.md`). New evidence in
+  `samples/evidence/` includes GitHub-inline GIFs for SOURCE | PIXEL |
+  PROFILE, a profile-only playback, an explicitly amplified difference view,
+  full-resolution MP4 versions, and a live cartoon wire capture. The 120 fps
+  capture contains 480 frames at a measured 115.6 fps with a 120 fps target;
+  its log is the authoritative transport evidence. `make_samples.sh` verifies
+  the committed source hashes before regenerating all artifacts.
 - `tests/load_server.rs` — a real-binary concurrent load test proving
   `--max-clients` under contention (both in-cap clients stream, `/healthz`
   reports the exact in-use count, the overflow connection is rejected, and a
@@ -49,12 +52,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
 - `asciline-render` — a headless `.ascf` → PPM frame renderer (pixel mode =
   coloured blocks, ASCII mode = palette characters in a public-domain 8×8
   bitmap font) that turns compiled clips into images/video via ffmpeg.
-- `samples/` — committed format evidence mirroring the original project's
-  demo stills: a 6 s mandelbrot clip compiled in all three formats (ASCII
-  mode / pixel mode / `--profile`) with decoded-frame comparison images, an
-  animated GIF, the playable `.ascf` files, and the profile quality report
-  (2.7 MB lossless pixel → 157 KB at PSNR-Y 36.35 dB / SSIM-Y 0.972).
-  Regenerate with `experiments/make_samples.sh`.
+- `samples/` — committed format evidence using an 8 s Big Buck Bunny cartoon
+  excerpt compiled in ASCII, lossless pixel, and `--profile` modes, with
+  decoded comparison images, GitHub-native GIFs, full MP4/difference views,
+  pinned source excerpts, playable `.ascf` files, and the profile quality
+  report. Regenerate with `experiments/make_samples.sh`.
 - `DEPLOYMENT.md` and `deploy/` — production deployment kit: a systemd unit
   (`asciline.service`), Docker Compose (`.env.example`, healthcheck, looped
   folder mode), and a Caddy TLS reverse-proxy config. The `deploy/` tree and

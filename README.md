@@ -250,59 +250,64 @@ The original project demonstrates its output with stills; here is the same
 comparison for this port, rendered **by our own decoders**: `asciline-render`
 headlessly rasterizes the compiled `.ascf` (pixel mode = coloured blocks, ASCII
 mode = the palette characters in an 8×8 bitmap font) straight from the codec
-frames a player would decode. Source: a synthetic 6 s, 640×360 mandelbrot zoom
-(lossless FFV1, deterministic).
+frames a player would decode. Source: an 8 s, 640×360 excerpt of the
+Creative-Commons-licensed **Big Buck Bunny** cartoon; attribution and
+checksums are in [`samples/SOURCE.md`](samples/SOURCE.md).
 
-| Output | Format | File | Size |
-| :--- | :--- | :--- | ---: |
-| <img src="samples/images/source.png" width="400" alt="Source frame"/> | original source frame | — | 300 KB |
-| <img src="samples/images/ascii.png" width="400" alt="ASCII mode"/> | ASCII mode (mode 4, adaptive lossless) | `samples/mandelbrot_ascii.ascf` | 1.0 MB |
-| <img src="samples/images/pixel.png" width="400" alt="PIXEL mode"/> | PIXEL mode (lossless adaptive) | `samples/mandelbrot_pixel.ascf` | 2.7 MB |
-| <img src="samples/images/prof.png" width="400" alt="--profile lossy DCT"/> | `--profile` lossy DCT, QF=70 | `samples/mandelbrot_profile.ascf` | **157 KB** |
+| Output | What it is | File |
+| :--- | :--- | :--- |
+| <img src="samples/images/cartoon_source.png" width="400" alt="Big Buck Bunny source frame"/> | original cartoon source | — |
+| <img src="samples/images/cartoon_ascii.png" width="400" alt="Big Buck Bunny ASCII mode"/> | ASCII mode (mode 4) | `samples/big_buck_bunny_ascii.ascf` |
+| <img src="samples/images/cartoon_pixel.png" width="400" alt="Big Buck Bunny PIXEL mode"/> | PIXEL mode (lossless adaptive) | `samples/big_buck_bunny_pixel.ascf` |
+| <img src="samples/images/cartoon_profile.png" width="400" alt="Big Buck Bunny profile mode"/> | `--profile` lossy DCT, QF=70 | `samples/big_buck_bunny_profile.ascf` |
 
-Animated (pixel mode, the lossless format):
-<img src="samples/images/pixel.gif" width="200" alt="PIXEL mode animation"/>
+The GitHub-native animated comparison is below. It uses the same cartoon
+frame in all three panels and is intentionally large enough to inspect:
+
+<img src="samples/evidence/cartoon_compare.gif" width="960" alt="Big Buck Bunny source, lossless pixel, and lossy profile comparison"/>
 
 Play the samples yourself:
 
 ```sh
-asciline-player samples/mandelbrot_profile.ascf   # terminal player
-asciline-render samples/mandelbrot_profile.ascf --out frames \
+asciline-player samples/big_buck_bunny_profile.ascf   # terminal player
+asciline-render samples/big_buck_bunny_profile.ascf --out frames \
   && ffmpeg -framerate 30 -i frames/frame_%06d.ppm out.mp4
 # the original static_player/ and Studio IDE also open .ascf files
 ```
 
-The `--profile` file is the headline: **2.7 MB → 157 KB (~17×)** for this 6 s
-clip, at a measured reconstruction quality of **PSNR-Y 36.35 dB / SSIM-Y 0.972**
-(see [`samples/mandelbrot_profile_quality.txt`](samples/mandelbrot_profile_quality.txt)
-for the full report, including the worst frame). The stills above are frame 60
-of each file — pixel and profile images are *decoded* frames, so what you see
-is exactly what `asciline-player` and the browser decoders render.
+The `--profile` file is the headline: it retains recognizable cartoon detail
+while using substantially fewer bytes — **9.78 MB lossless pixel → 346 KB
+profile (~28× smaller)** on this 8-second excerpt. The exact PSNR/SSIM report, including
+the worst frame, is in
+[`samples/big_buck_bunny_profile_quality.txt`](samples/big_buck_bunny_profile_quality.txt).
+The stills above are decoded frames — exactly what `asciline-player` and the
+browser decoder render, not screenshots of an internal encoder buffer.
 
-### Real video (not the GIF)
+### Real video artifacts
 
-Two playable mp4s prove the claims that stills cannot:
+The full-resolution MP4 artifacts prove the claims that stills cannot, while
+these GIFs are the versions GitHub can display inline:
+
+- <img src="samples/evidence/cartoon_profile.gif" width="560" alt="Big Buck Bunny profile-only playback"/>
+- <img src="samples/evidence/cartoon_difference.gif" width="960" alt="Big Buck Bunny amplified difference"/>
 
 | Video | What it shows |
 | :--- | :--- |
-| [`samples/evidence/quality_compare.mp4`](samples/evidence/quality_compare.mp4) | SOURCE \| PIXEL \| PROFILE side-by-side at **240 columns** (3× the still resolution), 30 fps, labels + measured PSNR burned into each frame |
-| [`samples/evidence/stream_120fps.mp4`](samples/evidence/stream_120fps.mp4) | the **actual WebSocket wire frames** captured live from `asciline-server` streaming a 120 fps source — 720 real frames at 120 fps, rendered by `asciline-render --live` |
+| [`samples/evidence/cartoon_compare.mp4`](samples/evidence/cartoon_compare.mp4) | SOURCE \| PIXEL \| PROFILE side-by-side at **240 columns** (3× the still resolution), 30 fps, labels + measured PSNR burned into each frame |
+| [`samples/evidence/cartoon_profile.mp4`](samples/evidence/cartoon_profile.mp4) | profile-only reconstruction at 30 fps |
+| [`samples/evidence/cartoon_difference.mp4`](samples/evidence/cartoon_difference.mp4) | source, profile, and explicitly 4× amplified difference panels |
+| [`samples/evidence/cartoon_120fps.mp4`](samples/evidence/cartoon_120fps.mp4) | the actual WebSocket wire frames captured live from `asciline-server` — 480 frames at a measured 115.6 fps with a 120 fps target |
 
-The 120 fps clip is the honest proof of the frame-rate claim: a browser capture
-cannot show more than the display refresh rate, so `--live` records what the
-server actually sends over the wire. The measured rates for that capture
-(240-column pixel mode, i.e. the highest-detail live config) are in
-[`samples/evidence/stream_120fps.log`](samples/evidence/stream_120fps.log):
+The 120 fps clip is a visual capture of the actual WebSocket frames from
+`asciline-server`; the authoritative measurements are in
+[`samples/evidence/cartoon_120fps.log`](samples/evidence/cartoon_120fps.log).
+It uses a real 60 fps Big Buck Bunny source with a 120 fps server target. The
+frame counter and measured wire rate are burned into the MP4. Browser playback
+cannot itself prove 120 fps, so the log is the evidence for the transport rate:
 
-```
-INIT: fps=120.0 mode=6 grid=240x135
-frames in 3.0s: 333 → 111.0 fps      # fps_count.js, browser-like WS counter
-live capture: 720 frames in 6.20s → 116.1 fps   # asciline-render --live
-```
-
-Both >60 fps. (A lossless FFV1 source caps the server near 47 fps — that is the
-source codec's decode cost, not the pipeline; the h264 source used here is why
-the wire stream holds 111–116 fps.)
+See the log for the exact frame count and rate from the current run. The
+comparison GIFs are deliberately 10 fps for browser/file-size compatibility;
+they are visual evidence of quality, not a claim about GIF playback rate.
 
 The samples are committed; regenerate them anytime with
 `experiments/make_samples.sh`.

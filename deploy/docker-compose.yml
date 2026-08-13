@@ -16,11 +16,13 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       # Optional auth: clients then connect to https://host/?token=SECRET.
-      # Leave unset for localhost-only deployments.
+      # Leave unset for localhost-only deployments (empty == unset, filtered by
+      # the server).
       ASCILINE_TOKEN: ${ASCILINE_TOKEN:-}
     volumes:
       - ./videos:/srv/asciline/videos
     # ENTRYPOINT already adds --host 0.0.0.0; tune the rest here.
+    # (--loop is an alias for --loop-playback.)
     command:
       - --folder
       - /srv/asciline/videos
@@ -29,9 +31,7 @@ services:
       - --loop
       - --max-clients
       - "8"
-    # HEALTHCHECK comes from the Dockerfile (/healthz).
-    healthcheck:
-      disable: false
-    # Keep ffmpeg's memory/CPU within bounds on shared hosts.
+    # Keep ffmpeg's memory/CPU within bounds on shared hosts. pids_limit counts
+    # threads too (ffmpeg + tokio + rayon), so keep it generous.
     mem_limit: 1g
-    pids_limit: 128
+    pids_limit: 512

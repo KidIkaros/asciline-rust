@@ -102,11 +102,18 @@ async fn concurrent_clients_respect_the_cap() {
     // ── disconnect frees the slot: a new client can connect and stream ──
     clients[0].close(None).await.ok();
     drop(clients.remove(0)); // closes TCP immediately → server frees the permit
-    tokio::time::sleep(Duration::from_millis(500)).await; // let the server notice
 
-    let (mut ws2, _) = connect_async(&url)
-        .await
-        .expect("a freed slot must be reusable");
+    // The permit frees when the server's read task notices the closed socket;
+    // poll-connect instead of sleeping so a slow runner can't flake.
+    let mut ws2 = None;
+    for _ in 0..50 {
+        if let Ok((ws, _)) = connect_async(&url).await {
+            ws2 = Some(ws);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let mut ws2 = ws2.expect("a freed slot must be reusable within 5s");
     expect_init(&mut ws2).await;
     expect_frame(&mut ws2).await;
     assert!(

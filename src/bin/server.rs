@@ -67,7 +67,7 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     vol: u8,
     /// Loop the queue infinitely.
-    #[arg(long)]
+    #[arg(long, alias = "loop")]
     loop_playback: bool,
     /// Adaptive-codec color fidelity (lossless = bit-exact).
     #[arg(long, default_value = "lossless")]
@@ -133,6 +133,10 @@ fn main() -> Result<()> {
         "low" => 16,
         other => anyhow::bail!("unknown --quality {other:?} (lossless|high|balanced|low)"),
     };
+    // An empty ASCILINE_TOKEN env var (e.g. `ASCILINE_TOKEN: ${ASCILINE_TOKEN:-}`
+    // in compose when .env omits it) must mean "unset", not "auth with an
+    // unusable empty secret".
+    let token = args.token.filter(|t| !t.is_empty());
 
     let defaults =
         QueueEntry::from_file(String::new(), mode, args.vol, pixel, args.rows, args.cols);
@@ -269,7 +273,7 @@ fn main() -> Result<()> {
         client_permits: Arc::new(tokio::sync::Semaphore::new(args.max_clients.max(1))),
         max_clients: args.max_clients.max(1),
         ffmpeg_permits: Arc::new(tokio::sync::Semaphore::new(args.max_ffmpeg.max(1))),
-        token: args.token,
+        token,
     };
     if state.token.is_some() {
         println!(" > Auth       : token required (?token=... on /ws, /audio, /scrub*)");

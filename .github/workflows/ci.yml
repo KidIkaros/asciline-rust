@@ -119,9 +119,13 @@ jobs:
           done
 
       - name: Fail if any crash was found
+        # cargo-fuzz creates per-target artifact *directories* after every run,
+        # so match regular files only (a real crash is a file, e.g.
+        # fuzz/artifacts/<target>/crash-<hash>).
         run: |
-          if ls fuzz/artifacts/* 2>/dev/null | grep -v README; then
+          if find fuzz/artifacts -type f ! -name 'README*' -print -quit 2>/dev/null | grep -q .; then
             echo "::error::libFuzzer found crashes in fuzz/artifacts/"
+            find fuzz/artifacts -type f ! -name 'README*'
             exit 1
           fi
           echo "no crashes"

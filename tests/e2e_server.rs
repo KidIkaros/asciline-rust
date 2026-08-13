@@ -29,7 +29,8 @@ fn make_test_video(tag: &str) -> Option<std::path::PathBuf> {
     if !ffmpeg_available() {
         return None;
     }
-    let path = std::env::temp_dir().join(format!("asciline_e2e_{}_{}.mp4", std::process::id(), tag));
+    let path =
+        std::env::temp_dir().join(format!("asciline_e2e_{}_{}.mp4", std::process::id(), tag));
     let status = std::process::Command::new("ffmpeg")
         .args([
             "-y",

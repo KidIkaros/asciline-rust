@@ -61,6 +61,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
   (A/B'd by `experiments/measure_profile_ab.sh`); its `nnz` rate estimate is
   deliberately crude so it stays off by default. The library keeps radius 3
   for bit-exact parity — only the CLI default changed.
+- Profile RDO switched to SATD (Hadamard) distortion + a pair-count rate
+  estimate (`cost = SATD + λ·(3·nnz + 1)`), the standard SAD → SATD → RD
+  ladder from real codecs. Measured ~2.4% smaller at −0.06 dB on the cartoon
+  QF=70 — a size↔quality knob, off by default. Per-QF skip-threshold scaling
+  was prototyped and rejected on measurement (QF=90 +9% size for +0.04 dB).
+- `QUALITY_PLAN.md` — a source-backed roadmap of the remaining quality
+  levers, ranked: per-block adaptive quantization, subpixel motion, in-loop
+  deblocking (all tag-5 / format changes), and why encoder-only RDO cannot be
+  a pure quality win.
 - `tests/load_server.rs` — a real-binary concurrent load test proving
   `--max-clients` under contention (both in-cap clients stream, `/healthz`
   reports the exact in-use count, the overflow connection is rejected, and a

@@ -31,7 +31,9 @@ Measured on a 60 fps source, `asciline-server --fps 60` streams **59.3 fps**,
 and the map+encode stage alone runs at a **~3,600 fps ceiling** at 240×67
 (2.7× faster than the equivalent numpy+codec.py work). The high-rate unique-
 frame throughput evidence is in the [sample benchmark](#unique-frame-throughput-proof);
-details and tables are in **[PERF_ANALYSIS.md](PERF_ANALYSIS.md)**.
+details and tables are in **[PERF_ANALYSIS.md](PERF_ANALYSIS.md)**. The
+source-backed roadmap for further quality work (per-block adaptive quant,
+subpixel motion, in-loop deblocking) is in **[QUALITY_PLAN.md](QUALITY_PLAN.md)**.
 
 ## Requirements
 

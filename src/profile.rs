@@ -211,8 +211,9 @@ pub struct ProfileEncoder {
     /// pans/zooms (e.g. drone footage); ±3 matches codec.py.
     pub r_search: i32,
     /// Rate-distortion λ for motion-vector selection. `0.0` = pure SAD (the
-    /// original behavior); `> 0` enables SAD-prefilter + RDO refinement, which
-    /// trades a little encode time for fewer bits at the same distortion.
+    /// original behavior); `> 0` enables SAD-prefilter + RDO refinement
+    /// (SATD distortion + coefficient-count rate), which trades a little
+    /// encode time for fewer bits at the same distortion.
     pub rdo_lambda: f64,
     pub level: u32,
     /// Scene-cut detection: mean absolute luma deviation vs the previous
@@ -585,6 +586,56 @@ fn dct_quant(
     (sse, cq, nnz)
 }
 
+/// Sum of absolute Hadamard-transformed differences (SATD) for one 8×8 block
+/// against a predictor. The 8×8 Hadamard is separable with ±1 coefficients
+/// (no multiplies); SATD predicts coefficient survival under quantization
+/// better than SAD/SSE, which is why codecs use it in the motion/mode-decision
+/// ladder (x264: SAD → SATD → RD). The transform scale is absorbed by the
+/// RDO lambda.
+#[inline]
+fn satd8(cur_b: &[[f64; 8]; 8], pred: &[[f64; 8]; 8]) -> f64 {
+    // Hadamard H8 (Sylvester construction), entries ±1.
+    const H: [[i64; 8]; 8] = [
+        [1, 1, 1, 1, 1, 1, 1, 1],
+        [1, -1, 1, -1, 1, -1, 1, -1],
+        [1, 1, -1, -1, 1, 1, -1, -1],
+        [1, -1, -1, 1, 1, -1, -1, 1],
+        [1, 1, 1, 1, -1, -1, -1, -1],
+        [1, -1, 1, -1, -1, 1, -1, 1],
+        [1, 1, -1, -1, -1, -1, 1, 1],
+        [1, -1, -1, 1, -1, 1, 1, -1],
+    ];
+    let mut r = [[0f64; 8]; 8];
+    for y in 0..8 {
+        for x in 0..8 {
+            r[y][x] = cur_b[y][x] - pred[y][x];
+        }
+    }
+    // tmp = H @ r
+    let mut tmp = [[0f64; 8]; 8];
+    for k in 0..8 {
+        for n in 0..8 {
+            let mut s = 0.0;
+            for m in 0..8 {
+                s += H[k][m] as f64 * r[m][n];
+            }
+            tmp[k][n] = s;
+        }
+    }
+    // t = tmp @ Hᵀ; sum |t| / 64
+    let mut sum = 0.0;
+    for k in 0..8 {
+        for v in 0..8 {
+            let mut s = 0.0;
+            for m in 0..8 {
+                s += tmp[k][m] * H[v][m] as f64;
+            }
+            sum += s.abs();
+        }
+    }
+    sum / 64.0
+}
+
 /// Compute one block's motion vector, quantized coefficients, skip decision
 /// and reconstruction. A pure function of the block's inputs (current plane,
 /// previous reconstruction, quant table) — every block is independent, so
@@ -636,8 +687,11 @@ fn enc_block(
             let mut best_cost = f64::INFINITY;
             for (dx, dy, _) in cands {
                 let pred = build_pred(prev, w, h, by, bx, ftype, use_mv, dx, dy);
-                let (sse, _, nnz) = dct_quant(&cur_b, &pred, qm, dz, f);
-                let cost = sse + rdo_lambda * nnz as f64;
+                let (_, _, nnz) = dct_quant(&cur_b, &pred, qm, dz, f);
+                // SATD distortion + rate: 1 (n_pairs) + 3 × nnz (run + 2-byte
+                // value per pair); the MV bytes are constant across candidates.
+                let satd = satd8(&cur_b, &pred);
+                let cost = satd + rdo_lambda * (3 * nnz + 1) as f64;
                 if cost < best_cost {
                     best_cost = cost;
                     mvx = dx;

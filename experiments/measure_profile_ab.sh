@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # A/B the profile encoder's motion-search knobs (--r-search / --rdo-lambda)
 # against a pinned source, reporting output size + PSNR-Y/SSIM-Y + wall time
-# so the rate-distortion trade-off is measurable.
+# so the rate-distortion trade-off is measurable. RDO uses SATD distortion
+# (Hadamard) + a coefficient-count rate, so the lambda scale differs from an
+# SSE-based cost.
 #
 # Usage:
 #   experiments/measure_profile_ab.sh                      # drone, 240 cols, QF=70
@@ -47,8 +49,7 @@ printf '%-16s %12s  %8s  %7s  %s\n' "config" "size" "PSNR-Y" "SSIM-Y" "wall"
 run_case "base r3"         3   0
 run_case "r7"              7   0
 run_case "r15"             15  0
-run_case "r7 l25"          7   25
-run_case "r7 l100"         7   100
-run_case "r7 l400"         7   400
-run_case "r7 l1600"        7   1600
-run_case "r15 l400"        15  400
+run_case "r7 l2k"          7   2000
+run_case "r7 l8k"          7   8000
+run_case "r7 l32k"         7   32000
+run_case "r15 l8k"         15  8000

@@ -11,6 +11,7 @@
  *   tag 2 DELTA : payload is zlib(indices[uint32 LE] ++ changed values)
  *   tag 3 RLE   : payload is zlib(runs: [uint16 count][cell bytes]...)
  *   tag 4 PROFILE: opt-in lossy DCT profile (pixel mode), see PROFILE.md
+ *   tag 5 PROFILE_AQ: tag 4 + per-block adaptive quantization (luma AQ map)
  *
  * Decoding MUST stay in arrival order (deltas patch the previous frame), so
  * callers feed messages through a sequential queue (see makeDecoder).
@@ -20,7 +21,7 @@
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AscilineCodec = api;
 })(typeof self !== 'undefined' ? self : this, function () {
-  const TAG_RAW = 0, TAG_ZLIB = 1, TAG_DELTA = 2, TAG_RLE_FULL = 3, TAG_PROFILE = 4;
+  const TAG_RAW = 0, TAG_ZLIB = 1, TAG_DELTA = 2, TAG_RLE_FULL = 3, TAG_PROFILE = 4, TAG_PROFILE_AQ = 5;
 
   async function inflate(bytes) {
     // Direct DecompressionStream pump — avoids the Blob+Response wrapper
@@ -69,17 +70,46 @@
   const _pO = new Int32Array(64);
   const _pZ = new Int32Array(64);
   const _pC = new Int32Array(64);
+  const _pQ = new Int32Array(64); // per-block scaled quant table (tag 5 AQ)
+  // Tag-5 AQ quant-step multipliers over 4, indexed by map value (index 0 =
+  // coarsest for flat regions, last = finest for detail). Mirrors profile.rs.
+  const _pAQ_2 = [4, 2];
+  const _pAQ_4 = [6, 4, 3, 2];
+  function _pScaleQm(qm, num) {
+    for (let i = 0; i < 64; i++) {
+      const v = Math.floor((qm[i] * num + 2) / 4);
+      _pQ[i] = v < 1 ? 1 : v;
+    }
+    return _pQ;
+  }
   function _pidct(C){
     for(let u=0;u<8;u++)for(let x=0;x<8;x++){let s=0;for(let v=0;v<8;v++)s+=C[u*8+v]*_P_MI[v*8+x];_pT[u*8+x]=s;}
     for(let y=0;y<8;y++)for(let x=0;x<8;x++){let s=0;for(let u=0;u<8;u++)s+=_P_MI[u*8+y]*_pT[u*8+x];_pO[y*8+x]=Math.floor((s+2048)/4096);}
     return _pO;
   }
-  function _pDecodePlane(data,off,P,NP,ft,useMv,qm){
+  function _pDecodePlane(data,off,P,NP,ft,useMv,qm,aqLevels){
     const W=P.w,H=P.h,nbx=W>>3,nby=H>>3,nb=nbx*nby;
+    // Tag-5 AQ map (luma only): log2(aqLevels) bits per block, MSB-first,
+    // preceding the skip mask. Same packing math as the Rust encoder/decoder.
+    const aqBits = aqLevels===2?1:(aqLevels===4?2:0);
+    let aqNums = null;
+    if(aqBits>0){
+      const nbytes=(nb*aqBits+7)>>3;
+      const map=data.subarray(off,off+nbytes); off+=nbytes;
+      const mask=(1<<aqBits)-1;
+      aqNums = new Int32Array(nb);
+      const nums = aqLevels===2 ? _pAQ_2 : _pAQ_4;
+      for(let bi=0;bi<nb;bi++){
+        const bit=bi*aqBits, byte=bit>>3, shift=8-aqBits-(bit&7);
+        aqNums[bi]=nums[(map[byte]>>shift)&mask];
+      }
+    }
     let skip=null; if(ft===1){const mb=(nb+7)>>3;skip=data.subarray(off,off+mb);off+=mb;}
     let bi=0,dcPred=0;
     for(let by=0;by<nby;by++)for(let bx=0;bx<nbx;bx++){
       if(ft===1 && (skip[bi>>3]&(128>>(bi&7)))){bi++;continue;}
+      const num = aqNums ? aqNums[bi] : 4;
+      const qmb = num===4 ? qm : _pScaleQm(qm,num);
       let dx=0,dy=0;
       if(ft===1&&useMv){dx=(data[off]<<24>>24);dy=(data[off+1]<<24>>24);off+=2;}
       const nP=data[off++];
@@ -90,8 +120,8 @@
       // DC-only block: the first MI row is constant (23), so the IDCT collapses to a
       // flat value. Same integers, same rounding -> identical to the full transform.
       let res=null,flat=0;
-      if(lastNz<=0){ flat=Math.floor((529*(_pZ[0]*qm[0])+2048)/4096); }
-      else { for(let k=0;k<64;k++){const id=_P_ZZ[k]; _pC[id]=_pZ[k]*qm[id];} res=_pidct(_pC); }
+      if(lastNz<=0){ flat=Math.floor((529*(_pZ[0]*qmb[0])+2048)/4096); }
+      else { for(let k=0;k<64;k++){const id=_P_ZZ[k]; _pC[id]=_pZ[k]*qmb[id];} res=_pidct(_pC); }
       for(let y=0;y<8;y++){
         const row=(by*8+y)*W;
         for(let x=0;x<8;x++){
@@ -112,26 +142,27 @@
       out[o]=B<0?0:(B>255?255:B);out[o+1]=G<0?0:(G>255?255:G);out[o+2]=R<0?0:(R>255?255:R);}}
     return out;}
   function makeProfileDecoder(){
-    let W=0,H=0,cW=0,cH=0,planes=null,spare=null,QL=null,QC=null;
+    let W=0,H=0,cW=0,cH=0,planes=null,spare=null,QL=null,QC=null,aqL=0;
     const alloc=()=>[{w:W,h:H,buf:new Uint8Array(W*H)},{w:cW,h:cH,buf:new Uint8Array(cW*cH)},{w:cW,h:cH,buf:new Uint8Array(cW*cH)}];
     async function decode(message){
       const b=message instanceof Uint8Array?message:new Uint8Array(message);
       const dv=new DataView(b.buffer,b.byteOffset,b.byteLength);
-      const idx=dv.getUint32(0,false); const payload=await inflate(b.subarray(5)); const ft=payload[0];
+      const idx=dv.getUint32(0,false); const tag=b[4]; const payload=await inflate(b.subarray(5)); const ft=payload[0];
       let off=1;
-      if(ft===0){ // keyframe self-describes: [QF][cols u16][rows u16]
-        const QF=payload[1]; const cols=(payload[2]<<8)|payload[3]; const rows=(payload[4]<<8)|payload[5]; off=6;
+      if(ft===0){ // keyframe self-describes: [QF][cols u16][rows u16][aq_levels (tag 5)]
+        const QF=payload[1]; const cols=(payload[2]<<8)|payload[3]; const rows=(payload[4]<<8)|payload[5];
+        if(tag===TAG_PROFILE_AQ){ aqL=payload[6]; off=7; } else { aqL=0; off=6; }
         const q=_pqtables(QF); QL=q[0]; QC=q[1];
         if(planes===null||W!==cols||H!==rows){W=cols;H=rows;cW=W>>1;cH=H>>1;planes=alloc();spare=alloc();}
       }
       // ping-pong the plane buffers instead of allocating a new set every frame
       const out=spare;
       for(let i=0;i<3;i++) out[i].buf.set(planes[i].buf);
-      for(let pi=0;pi<3;pi++) off=_pDecodePlane(payload,off,planes[pi],out[pi],ft,pi===0,pi===0?QL:QC);
+      for(let pi=0;pi<3;pi++) off=_pDecodePlane(payload,off,planes[pi],out[pi],ft,pi===0,pi===0?QL:QC,pi===0?aqL:0);
       spare=planes; planes=out;
       return {frameIndex:idx, frame:_pYuvToBgr(planes[0].buf,planes[1].buf,planes[2].buf,W,H)};
     }
-    return {decode, reset(){planes=null;spare=null;QL=QC=null;}};
+    return {decode, reset(){planes=null;spare=null;QL=QC=null;aqL=0;}};
   }
 
   /**
@@ -148,7 +179,7 @@
       const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
       const frameIndex = view.getUint32(0, false); // big-endian
       const tag = bytes[4];
-      if (tag === TAG_PROFILE) {
+      if (tag === TAG_PROFILE || tag === TAG_PROFILE_AQ) {
         if (!profileDec) profileDec = makeProfileDecoder();
         return await profileDec.decode(bytes);
       }
@@ -214,5 +245,5 @@
     return { decode, reset() { prev = null; profileDec = null; } };
   }
 
-  return { makeDecoder, makeProfileDecoder, inflate, TAG_RAW, TAG_ZLIB, TAG_DELTA, TAG_RLE_FULL, TAG_PROFILE };
+  return { makeDecoder, makeProfileDecoder, inflate, TAG_RAW, TAG_ZLIB, TAG_DELTA, TAG_RLE_FULL, TAG_PROFILE, TAG_PROFILE_AQ };
 });

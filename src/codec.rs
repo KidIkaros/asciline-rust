@@ -26,6 +26,12 @@ pub const TAG_ZLIB: u8 = 1;
 pub const TAG_DELTA: u8 = 2;
 pub const TAG_RLE_FULL: u8 = 3;
 pub const TAG_PROFILE: u8 = 4;
+/// Tag 5: the lossy DCT profile with per-block adaptive quantization (AQ).
+/// Same payload as tag 4 except the keyframe header carries an extra
+/// `[aq_levels u8]` byte and the luma plane leads with a packed per-block
+/// quant-scale map. Self-describing at keyframes, so unknown decoders can
+/// still sync; see `src/profile.rs` and `web/PROFILE.md`.
+pub const TAG_PROFILE_AQ: u8 = 5;
 
 pub const KEYFRAME_INTERVAL: u32 = 48;
 pub const DEFAULT_LEVEL: u32 = 3;

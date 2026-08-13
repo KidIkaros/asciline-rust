@@ -26,11 +26,11 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 run_case() {
-    local label="$1" r="$2" lam="$3"
+    local label="$1" r="$2" lam="$3" aq="$4"
     local out="$TMP/ab" t0 t1 size psnr ssim wall
     t0=$(date +%s.%N)
     "$BIN" "$SOURCE" --cols "$COLS" --profile --qf "$QF" --fps "$FPS" \
-        --r-search "$r" --rdo-lambda "$lam" --out "$out" > "$TMP/report.txt" 2>&1
+        --r-search "$r" --rdo-lambda "$lam" --aq "$aq" --out "$out" > "$TMP/report.txt" 2>&1
     t1=$(date +%s.%N)
     size=$(stat -c %s "$out.ascf")
     psnr=$(grep 'PSNR-Y' "$TMP/report.txt" | head -1 | awk '{print $3}')
@@ -43,13 +43,15 @@ PY
     printf '%-16s %12s B  PSNR-Y %8s  SSIM-Y %7s  %ss\n' "$label" "$size" "$psnr" "$ssim" "$wall"
 }
 
-echo "# Profile motion-search A/B"
+echo "# Profile motion-search + AQ A/B"
 echo "# source: $SOURCE (cols=$COLS qf=$QF fps=$FPS)"
 printf '%-16s %12s  %8s  %7s  %s\n' "config" "size" "PSNR-Y" "SSIM-Y" "wall"
-run_case "base r3"         3   0
-run_case "r7"              7   0
-run_case "r15"             15  0
-run_case "r7 l2k"          7   2000
-run_case "r7 l8k"          7   8000
-run_case "r7 l32k"         7   32000
-run_case "r15 l8k"         15  8000
+run_case "base r3"         3   0     0
+run_case "r7"              7   0     0
+run_case "r15"             15  0     0
+run_case "r7 l2k"          7   2000  0
+run_case "r7 l8k"          7   8000  0
+run_case "r7 l32k"         7   32000 0
+run_case "r15 l8k"         15  8000  0
+run_case "r7 aq2"          7   0     2
+run_case "r7 aq4"          7   0     4

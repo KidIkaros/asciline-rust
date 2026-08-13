@@ -74,6 +74,14 @@ struct Args {
     /// A positive value enables SAD-prefilter + RDO refinement.
     #[arg(long, default_value_t = 0.0)]
     rdo_lambda: f64,
+    /// Profile adaptive quantization levels: 2 = per-block quant-scale map
+    /// on the luma plane (tag 5, x264-style: detail blocks quantize finer,
+    /// flat blocks stay at the base table — measured +2 dB PSNR-Y at QF=70,
+    /// ~10% smaller at equal quality), 4 = 4-level map (2 bits/block),
+    /// 0 = off (tag 4, bit-exact with codec.py). Requires the browser
+    /// decoder at web/codec.js >= this commit.
+    #[arg(long, default_value_t = 2)]
+    aq: u8,
     /// Maximum zlib compression (level 9) — slower, smaller file.
     #[arg(long)]
     hard: bool,
@@ -153,17 +161,29 @@ fn main() -> Result<()> {
     // ── Opt-in lossy DCT profile (tag 4): 8x8 blocks over 4:2:0 planes need
     //    cols/rows to be multiples of 16, so the grid is padded up (like compiler.py).
     let profile = args.profile;
+    if profile && !matches!(args.aq, 0 | 2 | 4) {
+        bail!("--aq must be 0, 2 or 4 (0 = off, tag 4)");
+    }
     let (cols, rows) = if profile {
         let pc = cols.div_ceil(16) * 16;
         let pr = rows.div_ceil(16) * 16;
+        let tag = if args.aq > 0 { 5 } else { 4 };
+        let aq_note = if args.aq > 0 {
+            format!(" | AQ={} levels (tag 5)", args.aq)
+        } else {
+            String::new()
+        };
         if pc != cols || pr != rows {
             println!(
-                "[Compiler] Lossy DCT profile (tag 4) ON | QF={} | grid padded {}x{} → {}x{}",
+                "[Compiler] Lossy DCT profile (tag {tag}) ON | QF={}{aq_note} | grid padded {}x{} → {}x{}",
                 args.qf, cols, rows, pc, pr
             );
             (pc, pr)
         } else {
-            println!("[Compiler] Lossy DCT profile (tag 4) ON | QF={}", args.qf);
+            println!(
+                "[Compiler] Lossy DCT profile (tag {tag}) ON | QF={}{aq_note}",
+                args.qf
+            );
             (cols, rows)
         }
     } else {
@@ -217,6 +237,7 @@ fn main() -> Result<()> {
         let mut pe = ProfileEncoder::new(cols as usize, rows as usize, args.qf.clamp(1, 100));
         pe.r_search = args.r_search.max(0);
         pe.rdo_lambda = args.rdo_lambda.max(0.0);
+        pe.aq_levels = args.aq;
         if args.hard {
             pe.level = 9; // --hard applies to the profile's zlib stage too
         }

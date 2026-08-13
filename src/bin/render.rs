@@ -21,7 +21,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use asciline::codec::{CodecDecoder, MAX_DECOMPRESSED, TAG_PROFILE};
+use asciline::codec::{CodecDecoder, MAX_DECOMPRESSED, TAG_PROFILE, TAG_PROFILE_AQ};
 use asciline::profile::ProfileDecoder;
 use asciline::protocol::{parse_ascf_header, ASCF_MAGIC_V2};
 use clap::Parser;
@@ -159,7 +159,7 @@ fn main() -> Result<()> {
         // mode 1 streams plain text (the live-server INIT path), never a frame
         let frame: Vec<u8> = if header.mode == 1 {
             continue;
-        } else if msg.len() >= 5 && msg[4] == TAG_PROFILE {
+        } else if msg.len() >= 5 && (msg[4] == TAG_PROFILE || msg[4] == TAG_PROFILE_AQ) {
             pdec.decode(&msg)?.1
         } else {
             adec.decode(&msg)?.1
@@ -267,7 +267,7 @@ fn live_render(url: &str, args: &Args) -> Result<()> {
                             bail!("live frame: {} bytes != 4 + {}x{}x{}", b.len(), h.cols, h.rows, h.cell_bytes);
                         }
                         (u32::from_be_bytes([b[0], b[1], b[2], b[3]]), b[4..].to_vec())
-                    } else if b.len() >= 5 && b[4] == TAG_PROFILE {
+                    } else if b.len() >= 5 && (b[4] == TAG_PROFILE || b[4] == TAG_PROFILE_AQ) {
                         pdec.decode(&b)?
                     } else {
                         adec.as_mut().unwrap().decode(&b)?

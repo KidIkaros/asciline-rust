@@ -64,6 +64,7 @@ jobs:
           cargo test --test decode_profile_vectors -- --ignored
           cargo test --test roundtrip_profile -- --ignored
           node experiments/check_profile_vectors.js
+          node experiments/check_profile_aq_vectors.js
           cargo test --test decode_python_vectors -- --ignored
           node experiments/check_rust_vectors.js
 

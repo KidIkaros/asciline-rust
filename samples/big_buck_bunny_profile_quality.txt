@@ -1,5 +1,5 @@
 [Quality] Lossy DCT reconstruction vs source (240 frames, QF=70):
-[Quality]   PSNR-Y    36.57 dB   (min  33.72 / max  38.76)
-[Quality]   SSIM-Y   0.9686      (min 0.9565 / max 0.9772)
-[Quality]   PSNR-RGB  32.16 dB   (min  29.72 / max  34.68)
-[Quality]   worst frame #114  PSNR-Y  33.72 dB  (SSIM 0.9630 / RGB  29.72 dB)
+[Quality]   PSNR-Y    38.82 dB   (min  35.27 / max  40.77)
+[Quality]   SSIM-Y   0.9766      (min 0.9663 / max 0.9846)
+[Quality]   PSNR-RGB  32.80 dB   (min  30.23 / max  35.70)
+[Quality]   worst frame #144  PSNR-Y  35.27 dB  (SSIM 0.9707 / RGB  30.25 dB)

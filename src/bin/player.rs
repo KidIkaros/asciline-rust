@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use asciline::codec::{CodecDecoder, MAX_DECOMPRESSED, TAG_PROFILE};
+use asciline::codec::{CodecDecoder, MAX_DECOMPRESSED, TAG_PROFILE, TAG_PROFILE_AQ};
 use asciline::mapper::Mapper;
 use asciline::profile::ProfileDecoder;
 use asciline::protocol::{parse_ascf_header, ASCF_MAGIC_V2};
@@ -300,7 +300,7 @@ fn play_ascf(path: &str, stop: &Arc<AtomicBool>) -> Result<()> {
                 stdout.flush()?;
             }
         } else {
-            let is_profile = msg.len() > 4 && msg[4] == TAG_PROFILE;
+            let is_profile = msg.len() > 4 && (msg[4] == TAG_PROFILE || msg[4] == TAG_PROFILE_AQ);
             // Profile frames decode to BGR pixels; adaptive frames to cells.
             let (_, frame) = if is_profile {
                 pdec.decode(&msg)?

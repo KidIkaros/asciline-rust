@@ -162,9 +162,37 @@ asciline-compile clip.mp4 --profile --qf 90   # near-lossless (largest)
 
 `--qf` is the JPEG-style quality factor 1-100 (default 70). The decoded frames
 are reconstructions — lossy, but decoded **bit-exactly by the original browser
-decoder** (`codec.js` `makeProfileDecoder`) and by `asciline-player`. Measured
-on a 720p clip at 320 cols: **0.34 MB vs 2.64 MB** for the lossless adaptive
-pixel profile (~8× smaller).
+decoder** (`codec.js` `makeProfileDecoder`) and by `asciline-player`. On the
+pinned Big Buck Bunny excerpt the QF=70 profile is **9.78 MB lossless pixel →
+466 KB (~21× smaller)** at PSNR-Y 38.82 dB / SSIM-Y 0.9766 (the committed QF
+matrix is in
+[`samples/big_buck_bunny_quality_matrix.md`](samples/big_buck_bunny_quality_matrix.md)).
+
+**Adaptive quantization (tag 5, `--aq 2|4`):** the profile's quant tables are
+global — flat sky is quantized as hard as the tree line. With `--aq`, the
+luma plane carries a per-block quant-scale map (x264-style AQ: blocks are
+classified by their variance vs the frame's median, so **detail blocks
+quantize finer and flat blocks stay at the base table**). It is a new wire
+tag (5), decoded bit-exactly by `codec.js` and `asciline-player` — verify
+with `node experiments/check_profile_aq_vectors.js`.
+
+```bash
+asciline-compile clip.mp4 --profile           # tag 5, --aq 2 by default
+asciline-compile clip.mp4 --profile --aq 4    # 4-level map (2 bits/block)
+asciline-compile clip.mp4 --profile --aq 0    # tag 4, bit-exact with codec.py
+```
+
+Measured at QF=70 (cols=240): Big Buck Bunny goes 337 KB @ **36.57 dB** →
+466 KB @ **38.82 dB** (+2.25 dB PSNR-Y, +0.008 SSIM-Y); the 60 fps drone
+excerpt 240 KB @ 37.89 → 403 KB @ 39.72 (+1.83 dB). At **equal quality** the
+story matches x264's AQ claim: plain tag-4 needs QF≈84-85 (~500-516 KB on
+BBB) to reach AQ's ~38.8 dB, so AQ is roughly **10% smaller at the same
+PSNR-Y** — it spends bits where the eye looks instead of uniformly. Without
+rate control the fixed-QF size grows (detail-dense footage more so); that is
+the honest trade-off, and `--aq 2` beat `--aq 4` on both size and quality in
+our measurements. `--aq 2` is the compiler default; `--aq 0` restores the
+tag-4 stream (the library default stays 0, so the codec stays bit-exact with
+`codec.py` unless a tool opts in).
 
 Every `--profile` compile ends with a **quality report** — how far the lossy
 reconstruction drifts from the source, averaged over all frames (mean, min,
@@ -299,17 +327,19 @@ asciline-render samples/big_buck_bunny_profile.ascf --out frames \
 ```
 
 The `--profile` file is the headline: it retains recognizable cartoon detail
-while using substantially fewer bytes — **9.78 MB lossless pixel → 337 KB
-profile (~29× smaller)** on this 8-second excerpt. The exact PSNR/SSIM report, including
+while using substantially fewer bytes — **9.78 MB lossless pixel → 466 KB
+profile (~21× smaller)** on this 8-second excerpt (tag 5 AQ, the default
+profile mode; the reported PSNR/SSIM measures how close the lossy
+reconstruction is to the source). The exact PSNR/SSIM report, including
 the worst frame, is in
 [`samples/big_buck_bunny_profile_quality.txt`](samples/big_buck_bunny_profile_quality.txt).
 The QF=40/70/90 size-quality trade-off is:
 
 | QF | Profile size | Pixel/profile | PSNR-Y | SSIM-Y | PSNR-RGB |
 |---:|---:|---:|---:|---:|---:|
-| 40 | 210,854 B | 46.4× | 33.92 dB | 0.9465 | 30.25 dB |
-| 70 | 337,023 B | 29.0× | 36.57 dB | 0.9686 | 32.16 dB |
-| 90 | 669,483 B | 14.6× | 41.23 dB | 0.9867 | 34.58 dB |
+| 40 | 308,197 B | 31.7× | 35.95 dB | 0.9599 | 30.96 dB |
+| 70 | 466,221 B | 21.0× | 38.82 dB | 0.9766 | 32.80 dB |
+| 90 | 815,972 B | 12.0× | 43.78 dB | 0.9900 | 35.00 dB |
 
 The generated matrix is also available at
 [`samples/big_buck_bunny_quality_matrix.md`](samples/big_buck_bunny_quality_matrix.md).
@@ -322,16 +352,17 @@ Offline compile speed is a separate measurement:
 
 | Format | Display FPS | Compile FPS | Output |
 |---|---:|---:|---:|
-| ASCII mode | 30 | 216.2 | 2,620,569 B |
+| ASCII mode | 30 | 212.4 | 2,620,569 B |
 | PIXEL lossless | 30 | 111.1 | 9,779,783 B |
-| PROFILE QF=70 | 30 | 71.4 | 337,023 B |
-| PROFILE QF=70, no quality report | 30 | 106.2 | 337,023 B |
+| PROFILE QF=70 (tag 5 AQ) | 30 | 145.5 | 466,221 B |
+| PROFILE QF=70, no quality report | 30 | 198.3 | 466,221 B |
 
 These are representative measurements on the pinned 240-frame excerpt; compile
 FPS means frames processed per wall-second, not playback FPS. The profile's
-±7 motion search (the default) is ~4.6× the SAD work of codec.py's ±3, so
-profile compile is ~2.7× slower than a ±3 baseline (`--r-search 3` trades back
-the size/quality gain for original speed); display FPS is unaffected. The full
+±7 motion search (the default) is ~4.6× the SAD work of codec.py's ±3, and
+per-block AQ adds the variance map, so profile compile is slower than a ±3
+tag-4 baseline (`--r-search 3 --aq 0` trades back the size/quality gain for
+original speed); display FPS is unaffected. The full
 report and rerun script are
 [`samples/big_buck_bunny_speed_analysis.md`](samples/big_buck_bunny_speed_analysis.md)
 and `experiments/measure_sample_speed.sh`. GIFs are intentionally downsampled
@@ -375,8 +406,8 @@ Every panel is labeled **clip 60 fps**, and the full-resolution MP4 is
 <img src="samples/evidence/drone_profile.gif" width="560" alt="60 fps drone flight profile-only playback"/>
 
 On this 8-second, 480-frame clip the lossy profile is **10.1 MB lossless pixel
-→ 240 KB (~44× smaller)** at **PSNR-Y 37.89 dB / SSIM-Y 0.9470** (worst frame
-#240, PSNR-Y 35.05 dB). Full report:
+→ 403 KB (~25× smaller)** at **PSNR-Y 39.72 dB / SSIM-Y 0.9575** (worst frame
+#192, PSNR-Y 36.14 dB). Full report:
 [`samples/drone_profile_quality.txt`](samples/drone_profile_quality.txt).
 Attribution and checksums are in [`samples/SOURCE.md`](samples/SOURCE.md).
 

@@ -18,23 +18,32 @@
 //! this linear algebra; silence the iterator rewrites they'd otherwise trigger.
 #![allow(clippy::needless_range_loop, clippy::explicit_counter_loop)]
 
-//! Wire format (per frame message, after the shared `[u32 BE index][u8 tag=4]`):
+//! Wire format (per frame message, after the shared `[u32 BE index][u8 tag]`):
 //! ```text
 //! payload = zlib( body )
 //! body:
 //!   [u8 ftype]                       0 = keyframe, 1 = inter
 //!   keyframe only: [u8 QF][u16 BE cols][u16 BE rows]
+//!     tag 5 only:  [+ u8 aq_levels]  2 or 4 quant-scale levels
 //!   then 3 planes (Y full, Cb/Cr half), each:
+//!     tag 5 luma only: [ceil(nb*bits/8) bytes AQ map, MSB-first bit-packed,
+//!                       bits = log2(aq_levels) per block]
 //!     inter only: [ceil(nb/8) bytes skip mask, MSB-first]
 //!     per coded block, raster order:
 //!       luma inter: [i8 dx][i8 dy]
 //!       [u8 n_pairs][ (u8 run)(i16 LE value) × n_pairs ]
 //! ```
+//!
+//! Tag 5 (adaptive quantization) differs from tag 4 only in the two marked
+//! places: the keyframe signals how many per-block quant-scale levels the
+//! stream uses, and each luma plane carries the packed map selecting one of
+//! them per block. The decoder scales its quant table identically
+//! (`floor((m*num+2)/4)` integer math) so no floats cross the wire.
 
 use anyhow::{bail, Result};
 use rayon::prelude::*;
 
-use crate::codec::{zlib_compress, zlib_decompress, TAG_PROFILE};
+use crate::codec::{zlib_compress, zlib_decompress, TAG_PROFILE, TAG_PROFILE_AQ};
 use crate::quality::{psnr, ssim, QualityStats};
 
 /// Forced keyframe interval (same as the adaptive codec's).
@@ -49,6 +58,130 @@ const DEFAULT_DZ: f64 = 0.75;
 /// Default skip threshold: inter blocks with SSE below this and zero motion
 /// are skipped even if they have non-zero coefficients.
 const DEFAULT_SKIP_T: f64 = 256.0;
+/// Adaptive-quantization (tag 5) quant-step multipliers over a denominator of
+/// 4, indexed by map value. Index 0 is the COARSEST (flat regions), the last
+/// is the FINEST (detail) — mirroring x264 AQ's "spend bits where the eye
+/// looks". num = 4 is the identity scale (the tag-4 table).
+// Measured on Big Buck Bunny + drone at QF=70: these tables gave the best
+// quality-per-byte (2 levels: flat stays at the base table, detail halves its
+// step; 4 levels: a log-spaced ladder about the identity). Coarser-than-base
+// tables (e.g. [8,2]) shrank the file but cost more PSNR/SSIM than they
+// saved — without rate control, fixed-QF AQ is a quality↔size knob.
+const AQ_NUMS_2: [i64; 2] = [4, 2];
+const AQ_NUMS_4: [i64; 4] = [6, 4, 3, 2];
+
+/// The quant-step multiplier (over 4) for an AQ map value.
+#[inline]
+fn aq_num(levels: u8, idx: u8) -> i64 {
+    match levels {
+        2 => AQ_NUMS_2[idx as usize],
+        4 => AQ_NUMS_4[idx as usize],
+        _ => 4, // identity
+    }
+}
+
+/// Scale a quant table by `num/4`, rounding to the nearest integer. Both sides
+/// of the wire compute this with identical integer math: `floor((m*num+2)/4)`.
+/// `m >= 1` and `num >= 2` keep the numerator positive, so floor division is
+/// unambiguous across Rust (`div_euclid`) and JS (`Math.floor`).
+#[inline]
+fn scale_qm(qm: &[i64; 64], num: i64) -> [i64; 64] {
+    let mut out = [0i64; 64];
+    for i in 0..64 {
+        out[i] = ((qm[i] * num + 2) / 4).max(1);
+    }
+    out
+}
+
+/// Per-block luma variance (E[x²] − E[x]² over the 8×8 block) — the AQ
+/// activity signal. Pure function of the plane, so it is deterministic.
+#[inline]
+fn block_var(y: &[u8], w: usize, by: usize, bx: usize) -> f64 {
+    let mut s: i64 = 0;
+    let mut s2: i64 = 0;
+    for r in 0..8usize {
+        let row = (by * 8 + r) * w + bx * 8;
+        for x in 0..8usize {
+            let v = y[row + x] as i64;
+            s += v;
+            s2 += v * v;
+        }
+    }
+    let n = 64.0f64;
+    let mean = s as f64 / n;
+    let mean_sq = s2 as f64 / n;
+    (mean_sq - mean * mean).max(0.0)
+}
+
+/// Map each luma block to an AQ quant-scale index from its variance, relative
+/// to the frame's median block variance `m` (adaptive, deterministic). High
+/// variance = detail → finer quant; low variance = flat → coarser quant.
+fn aq_indices(y: &[u8], w: usize, h: usize, levels: u8) -> Vec<u8> {
+    let nbx = w / 8;
+    let nby = h / 8;
+    let nb = nbx * nby;
+    let vars: Vec<f64> = (0..nb)
+        .map(|bi| block_var(y, w, bi / nbx, bi % nbx))
+        .collect();
+    let mut sorted = vars.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let m = sorted[nb / 2].max(1.0);
+    vars.into_iter()
+        .map(|v| match levels {
+            2 => {
+                if v < m {
+                    0
+                } else {
+                    1
+                }
+            }
+            _ => {
+                // 4 levels: quartile-ish log-spaced thresholds about the median.
+                if v < m / 8.0 {
+                    0
+                } else if v < m / 2.0 {
+                    1
+                } else if v < m * 2.0 {
+                    2
+                } else {
+                    3
+                }
+            }
+        })
+        .collect()
+}
+
+/// Pack per-block AQ indices into `bits`-per-block bytes, MSB-first — the
+/// same bit order as the skip mask (1 bit/block), extended to 2 bits for
+/// 4-level maps. Identical packing on the JS side (`web/codec.js`).
+fn pack_aq_map(indices: &[u8], bits: u8) -> Vec<u8> {
+    let nbytes = indices.len().div_ceil(8 / bits as usize);
+    let mut out = vec![0u8; nbytes];
+    for (bi, &idx) in indices.iter().enumerate() {
+        let bit = bi * bits as usize;
+        let byte = bit >> 3;
+        // MSB-first within the byte: a `bits`-wide field ends at bit 7, so
+        // shift = 8 - bits - (bit & 7) (bits=1 → 7-(bit&7), the skip-mask order).
+        let shift = 8 - bits as usize - (bit & 7);
+        out[byte] |= (idx & ((1 << bits) - 1)) << shift;
+    }
+    out
+}
+
+/// Unpack the AQ map byte-wise and return the per-block quant-scale numerator
+/// (`num`, denominator 4). Mirrors `pack_aq_map` exactly.
+fn unpack_aq_map(map: &[u8], nb: usize, levels: u8) -> Vec<i64> {
+    let bits = (levels as u32).ilog2() as usize;
+    let mask = (1 << bits) - 1;
+    (0..nb)
+        .map(|bi| {
+            let bit = bi * bits;
+            let shift = 8 - bits - (bit & 7);
+            let idx = (map[bit >> 3] >> shift) & mask as u8;
+            aq_num(levels, idx)
+        })
+        .collect()
+}
 /// Scene-cut keyframe threshold: when the mean absolute luma deviation between
 /// the source frame and the previous reconstruction exceeds this (0-255 scale),
 /// motion prediction is useless and the frame is encoded as a fresh keyframe.
@@ -207,6 +340,11 @@ pub struct ProfileEncoder {
     pub qf: u8,
     pub dz: f64,
     pub skip_t: f64,
+    /// Adaptive quantization (tag 5): per-block quant-scale levels for the
+    /// luma plane, 0 = off (tag 4, bit-exact original). `2` and `4` select
+    /// two- and four-level maps derived from each block's luma variance —
+    /// flat blocks quantize coarser, detail blocks finer (x264-style AQ).
+    pub aq_levels: u8,
     /// Motion search radius (integer pixels, ±N). Larger radii help smooth
     /// pans/zooms (e.g. drone footage); ±3 matches codec.py.
     pub r_search: i32,
@@ -255,6 +393,7 @@ impl ProfileEncoder {
             qf,
             dz,
             skip_t,
+            aq_levels: 0, // off by default: tag 4, bit-exact original behavior
             r_search: DEFAULT_R_SEARCH,
             rdo_lambda: 0.0,
             level,
@@ -358,17 +497,31 @@ impl ProfileEncoder {
             }
         }
 
+        let (ql, qc) = qtables(self.qf as i64);
+        let planes = [y, cb, cr];
+
+        // Tag 5 (AQ) prep: per-block quant-scale map for the luma plane, packed
+        // MSB-first. Deterministic — a pure function of the luma plane.
+        let aq: (u8, Option<Vec<u8>>) = if self.aq_levels > 0 {
+            let idxs = aq_indices(&planes[0], w, h, self.aq_levels);
+            let bits = (self.aq_levels as u32).ilog2() as u8;
+            (self.aq_levels, Some(pack_aq_map(&idxs, bits)))
+        } else {
+            (0, None)
+        };
+
         let mut payload: Vec<u8> = Vec::new();
         payload.push(ftype);
         if ftype == 0 {
-            // keyframe self-describes: [QF][cols u16][rows u16]
+            // keyframe self-describes: [QF][cols u16][rows u16][aq_levels (tag 5)]
             payload.push(self.qf);
             payload.extend_from_slice(&(w as u16).to_be_bytes());
             payload.extend_from_slice(&(h as u16).to_be_bytes());
+            if aq.0 > 0 {
+                payload.push(aq.0);
+            }
         }
 
-        let (ql, qc) = qtables(self.qf as i64);
-        let planes = [y, cb, cr];
         let mut recons: [Plane; 3] = [Plane::new(0, 0), Plane::new(0, 0), Plane::new(0, 0)];
         for pi in 0..3usize {
             let (pw, ph) = if pi == 0 { (w, h) } else { (cw, ch) };
@@ -377,6 +530,12 @@ impl ProfileEncoder {
                 Some(&self.prev.as_ref().unwrap()[pi])
             } else {
                 None
+            };
+            // The AQ map is luma-only (chroma always uses the base tables).
+            let (al, am) = if pi == 0 {
+                (aq.0, aq.1.as_deref())
+            } else {
+                (0, None)
             };
             let (body, rec) = enc_plane(
                 &planes[pi],
@@ -390,6 +549,8 @@ impl ProfileEncoder {
                 self.skip_t,
                 self.r_search,
                 self.rdo_lambda,
+                al,
+                am,
             );
             payload.extend_from_slice(&body);
             recons[pi] = rec;
@@ -398,7 +559,11 @@ impl ProfileEncoder {
         let z = zlib_compress(&payload, self.level);
         let mut msg = Vec::with_capacity(5 + z.len());
         msg.extend_from_slice(&self.n.to_be_bytes());
-        msg.push(TAG_PROFILE);
+        msg.push(if aq.0 > 0 {
+            TAG_PROFILE_AQ
+        } else {
+            TAG_PROFILE
+        });
         msg.extend_from_slice(&z);
 
         self.prev = Some(recons);
@@ -656,7 +821,18 @@ fn enc_block(
     f: &[[f64; 8]; 8],
     r_search: i32,
     rdo_lambda: f64,
+    aq_num: i64,
 ) -> BlockEnc {
+    // AQ (tag 5): scale this block's quant table by aq_num/4. num = 4 is the
+    // identity (tag-4 table), so the tag-4 path takes the zero-cost branch.
+    let qm_b: [i64; 64];
+    let qm_ref: &[i64; 64] = if aq_num == 4 {
+        qm
+    } else {
+        qm_b = scale_qm(qm, aq_num);
+        &qm_b
+    };
+
     // current block as f64
     let mut cur_b = [[0f64; 8]; 8];
     for y in 0..8 {
@@ -687,7 +863,7 @@ fn enc_block(
             let mut best_cost = f64::INFINITY;
             for (dx, dy, _) in cands {
                 let pred = build_pred(prev, w, h, by, bx, ftype, use_mv, dx, dy);
-                let (_, _, nnz) = dct_quant(&cur_b, &pred, qm, dz, f);
+                let (_, _, nnz) = dct_quant(&cur_b, &pred, qm_ref, dz, f);
                 // SATD distortion + rate: 1 (n_pairs) + 3 × nnz (run + 2-byte
                 // value per pair); the MV bytes are constant across candidates.
                 let satd = satd8(&cur_b, &pred);
@@ -718,7 +894,7 @@ fn enc_block(
 
     // predict + residual + DCT + dead-zone quantize (shared with the RDO path)
     let pred = build_pred(prev, w, h, by, bx, ftype, use_mv, mvx, mvy);
-    let (sse, cq, nnz) = dct_quant(&cur_b, &pred, qm, dz, f);
+    let (sse, cq, nnz) = dct_quant(&cur_b, &pred, qm_ref, dz, f);
 
     // skip decision (inter only)
     let is_skip =
@@ -737,7 +913,7 @@ fn enc_block(
         let mut c = [[0i64; 8]; 8];
         for y in 0..8 {
             for x in 0..8 {
-                c[y][x] = cq[y][x] * qm[y * 8 + x];
+                c[y][x] = cq[y][x] * qm_ref[y * 8 + x];
             }
         }
         let idct = idct_int(&c);
@@ -781,11 +957,20 @@ fn enc_plane(
     skip_t: f64,
     r_search: i32,
     rdo_lambda: f64,
+    aq_levels: u8,
+    aq_map: Option<&[u8]>,
 ) -> (Vec<u8>, Plane) {
     let nbx = w / 8;
     let nby = h / 8;
     let nb = nbx * nby;
     let f = dct_basis();
+
+    // Per-block quant-scale numerator (denominator 4); identity when AQ is off.
+    let nums: Vec<i64> = if aq_levels > 0 {
+        unpack_aq_map(aq_map.expect("aq map missing"), nb, aq_levels)
+    } else {
+        Vec::new()
+    };
 
     // ── phase 1: parallel per-block compute (rayon preserves raster order) ──
     let blocks: Vec<BlockEnc> = (0..nb)
@@ -793,8 +978,10 @@ fn enc_plane(
         .map(|bi| {
             let by = bi / nbx;
             let bx = bi % nbx;
+            let aq_num = if aq_levels > 0 { nums[bi] } else { 4 };
             enc_block(
                 cur, prev, w, h, by, bx, ftype, use_mv, qm, dz, skip_t, f, r_search, rdo_lambda,
+                aq_num,
             )
         })
         .collect();
@@ -855,8 +1042,12 @@ fn enc_plane(
         }
     }
 
-    // skip mask (MSB-first), then block data
+    // AQ map (tag 5, luma only) precedes the skip mask: same MSB-first order
+    // the decoder reads it in.
     let mut head: Vec<u8> = Vec::new();
+    if let Some(map) = aq_map {
+        head.extend_from_slice(map);
+    }
     if ftype == 1 {
         let mut mask = vec![0u8; nb.div_ceil(8)];
         for (bi, blk) in blocks.iter().enumerate() {
@@ -906,6 +1097,8 @@ pub struct ProfileDecoder {
     qc: Option<[i64; 64]>,
     cur: Option<[Plane; 3]>,
     spare: Option<[Plane; 3]>,
+    /// AQ levels signaled by the last tag-5 keyframe (0 = tag-4 stream).
+    aq_levels: u8,
 }
 
 impl ProfileDecoder {
@@ -915,6 +1108,7 @@ impl ProfileDecoder {
             qc: None,
             cur: None,
             spare: None,
+            aq_levels: 0,
         }
     }
 
@@ -923,6 +1117,7 @@ impl ProfileDecoder {
         self.qc = None;
         self.cur = None;
         self.spare = None;
+        self.aq_levels = 0;
     }
 
     /// Decode one wire message → `(frame_index, full BGR frame)`.
@@ -930,6 +1125,7 @@ impl ProfileDecoder {
         if msg.len() < 5 {
             bail!("profile message too short");
         }
+        let tag = msg[4];
         let idx = u32::from_be_bytes([msg[0], msg[1], msg[2], msg[3]]);
         let payload = zlib_decompress(&msg[5..])?;
         if payload.is_empty() {
@@ -961,7 +1157,21 @@ impl ProfileDecoder {
             {
                 bail!("profile grid {w}x{h} out of bounds");
             }
-            off = 6;
+            // Tag 5 keyframes carry one extra header byte: the AQ level count.
+            self.aq_levels = if tag == TAG_PROFILE_AQ {
+                if payload.len() < 7 {
+                    bail!("profile AQ keyframe truncated");
+                }
+                let lv = payload[6];
+                if lv != 2 && lv != 4 {
+                    bail!("profile AQ levels {lv} out of bounds (2 or 4)");
+                }
+                off = 7;
+                lv
+            } else {
+                off = 6;
+                0
+            };
             let (ql, qc) = qtables(qf);
             self.ql = Some(ql);
             self.qc = Some(qc);
@@ -986,13 +1196,29 @@ impl ProfileDecoder {
         for i in 0..3 {
             spare[i].buf.copy_from_slice(&cur[i].buf);
         }
+        // AQ applies to the luma plane only; chroma always uses the base tables.
+        let frame_aq = if tag == TAG_PROFILE_AQ {
+            self.aq_levels
+        } else {
+            0
+        };
         for pi in 0..3usize {
             let qm = if pi == 0 {
                 self.ql.as_ref().unwrap()
             } else {
                 self.qc.as_ref().unwrap()
             };
-            off = dec_plane(&payload, off, &cur[pi], &mut spare[pi], ftype, pi == 0, qm)?;
+            let aq = if pi == 0 { frame_aq } else { 0 };
+            off = dec_plane(
+                &payload,
+                off,
+                &cur[pi],
+                &mut spare[pi],
+                ftype,
+                pi == 0,
+                qm,
+                aq,
+            )?;
         }
         std::mem::swap(&mut self.cur, &mut self.spare);
 
@@ -1018,6 +1244,7 @@ fn dec_plane(
     ftype: u8,
     use_mv: bool,
     qm: &[i64; 64],
+    aq_levels: u8,
 ) -> Result<usize> {
     let w = cur.w;
     let h = cur.h;
@@ -1025,8 +1252,24 @@ fn dec_plane(
     let nby = h / 8;
     let nb = nbx * nby;
 
+    // Tag-5 AQ map (luma only): `log2(levels)` bits per block, MSB-first,
+    // preceding the skip mask. Unpacked once into per-block quant numerators.
+    let aq_nums: Vec<i64> = if aq_levels > 0 {
+        let bits = (aq_levels as u32).ilog2() as usize;
+        let nbytes = nb.div_ceil(8 / bits);
+        if off + nbytes > data.len() {
+            bail!("profile plane truncated (AQ map)");
+        }
+        let nums = unpack_aq_map(&data[off..off + nbytes], nb, aq_levels);
+        off += nbytes;
+        nums
+    } else {
+        Vec::new()
+    };
+
     let skip: Option<&[u8]> = if ftype == 1 {
         let mb = nb.div_ceil(8);
+
         if off + mb > data.len() {
             bail!("profile plane truncated (skip mask)");
         }
@@ -1050,6 +1293,17 @@ fn dec_plane(
                     continue;
                 }
             }
+
+            // Per-block scaled quant table (AQ) — identical integer math to the
+            // encoder's and the JS decoder's.
+            let num = if aq_levels > 0 { aq_nums[bi] } else { 4 };
+            let qm_b: [i64; 64];
+            let qm_ref: &[i64; 64] = if num == 4 {
+                qm
+            } else {
+                qm_b = scale_qm(qm, num);
+                &qm_b
+            };
 
             let (mut dx, mut dy) = (0i32, 0i32);
             if ftype == 1 && use_mv {
@@ -1094,7 +1348,7 @@ fn dec_plane(
             let h32 = h as i32;
             if last_nz <= 0 {
                 // DC-only block: IDCT collapses to a flat value
-                let flat = (529 * (z[0] * qm[0]) + 2048).div_euclid(4096);
+                let flat = (529 * (z[0] * qm_ref[0]) + 2048).div_euclid(4096);
                 for y in 0..8 {
                     for x in 0..8 {
                         let pred = if ftype == 0 {
@@ -1110,7 +1364,7 @@ fn dec_plane(
             } else {
                 // de-zigzag: c[spatial] = z[zigzag] * qm[spatial]
                 for k in 0..64usize {
-                    c[ZZ[k]] = z[k] * qm[ZZ[k]];
+                    c[ZZ[k]] = z[k] * qm_ref[ZZ[k]];
                 }
                 let mut cm = [[0i64; 8]; 8];
                 for y in 0..8 {
@@ -1224,6 +1478,81 @@ mod tests {
             let (msg, shown) = enc.encode(&f);
             let (_, out) = dec.decode(&msg).unwrap();
             assert_eq!(out, shown, "frame {i} mismatch (covers keyframe resync)");
+        }
+    }
+
+    #[test]
+    fn aq_roundtrip_2_and_4_levels() {
+        // Tag-5 AQ streams must round-trip through OUR decoder for both level
+        // counts, across keyframes, inter frames, skips and forced scene cuts.
+        for levels in [2u8, 4u8] {
+            let (w, h) = (48usize, 32usize);
+            let mut enc = ProfileEncoder::new(w, h, 70);
+            enc.aq_levels = levels;
+            enc.scene_cut_mad = 20.0;
+            let mut dec = ProfileDecoder::new();
+            let mut frames: Vec<Vec<u8>> = (0..10u32).map(|i| synth_bgr(w, h, i, 42)).collect();
+            frames.push(ramp_bgr(w, h, 9)); // hard scene change → forced keyframe
+            for (i, f) in frames.iter().enumerate() {
+                let (msg, shown) = enc.encode(f);
+                assert_eq!(
+                    msg[4], TAG_PROFILE_AQ,
+                    "AQ encoder must emit tag 5 (levels={levels}, frame {i})"
+                );
+                let (idx, out) = dec
+                    .decode(&msg)
+                    .unwrap_or_else(|e| panic!("levels={levels} frame {i}: {e}"));
+                assert_eq!(idx, i as u32);
+                assert_eq!(
+                    out, shown,
+                    "AQ levels={levels} frame {i}: decoder must reproduce shown frame"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aq_off_is_bit_exact_tag4() {
+        // `aq_levels = 0` must leave the tag-4 stream byte-identical, and the
+        // AQ bit-packing must be stable under round-trips.
+        let (w, h) = (48usize, 32usize);
+        let mut enc = ProfileEncoder::new(w, h, 70);
+        assert_eq!(enc.aq_levels, 0, "AQ must default off");
+        let mut dec = ProfileDecoder::new();
+        for i in 0..8u32 {
+            let f = synth_bgr(w, h, i, 99);
+            let (msg, shown) = enc.encode(&f);
+            assert_eq!(msg[4], TAG_PROFILE, "AQ off must emit tag 4");
+            let (_, out) = dec.decode(&msg).unwrap();
+            assert_eq!(out, shown);
+        }
+    }
+
+    #[test]
+    fn aq_map_pack_unpack_roundtrip() {
+        // Packing must be lossless for both widths so Rust and JS decode the
+        // same per-block scales (MSB-first, `ilog2(levels)` bits per block).
+        for (levels, indices) in [
+            (2u8, vec![0u8, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1]),
+            (4u8, vec![3u8, 0, 1, 2, 3, 3, 0, 2, 1, 1, 0, 3, 2, 2, 1, 0]),
+        ] {
+            let bits = (levels as u32).ilog2() as u8;
+            let packed = pack_aq_map(&indices, bits);
+            let nums = unpack_aq_map(&packed, indices.len(), levels);
+            let want: Vec<i64> = indices.iter().map(|&i| aq_num(levels, i)).collect();
+            assert_eq!(nums, want, "AQ map round-trip (levels={levels})");
+        }
+    }
+
+    #[test]
+    fn scale_qm_identity_and_halving() {
+        // num=4 must be the identity table; num=2 must halve each step.
+        let (ql, _) = qtables(70);
+        let id = scale_qm(&ql, 4);
+        assert_eq!(id, ql, "num=4 is the identity scale");
+        let half = scale_qm(&ql, 2);
+        for i in 0..64 {
+            assert_eq!(half[i], ((ql[i] * 2 + 2) / 4).max(1));
         }
     }
 

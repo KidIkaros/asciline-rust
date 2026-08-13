@@ -36,9 +36,10 @@ ffmpeg -y -v error \
     -c:v ffv1 -f matroska "$TMP/clip.mkv"
 
 # tag-4 lossy DCT profile (cell-independent) — the deep DCT decoder paths.
-# Pin --r-search 3 (codec.py's radius) so the committed seeds stay byte-stable
-# regardless of the compiler's newer default radius.
-"$BIN" "$TMP/clip.mkv" --cols 240 --profile --qf 70 --no-quality --r-search 3 --out "$TMP/prof" >/dev/null
+# Pin --r-search 3 (codec.py's radius) AND --aq 0 (tag 4, no AQ map) so the
+# committed seeds stay byte-stable regardless of the compiler's newer defaults
+# (r=7 and aq=2 emit different — tag-5 — bytes).
+"$BIN" "$TMP/clip.mkv" --cols 240 --profile --qf 70 --no-quality --r-search 3 --aq 0 --out "$TMP/prof" >/dev/null
 # adaptive, cell=4 (text mode, 16 M colours)
 "$BIN" "$TMP/clip.mkv" --cols 40 --mode 6 --tolerance 8 --no-quality --out "$TMP/adapt4" >/dev/null
 # adaptive, cell=3 (pixel mode)

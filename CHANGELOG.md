@@ -8,6 +8,22 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
 
 ### Added
 
+- **Adaptive quantization (tag 5)** for the lossy DCT profile — now the
+  **default** for `asciline-compile --profile` (`--aq 2`; `--aq 0` restores
+  the tag-4 bit-exact stream, `--aq 4` selects the 4-level map): x264-style
+  per-block quant-scale map on the luma plane (blocks classified by variance
+  vs the frame median — detail finer, flat at base), a new self-describing
+  wire tag decoded bit-exactly by `web/codec.js` and `asciline-player` (fuzz
+  corpus + Python vectors unaffected — the corpus generator pins `--aq 0`).
+  Measured at QF=70/cols=240: Big Buck Bunny 337 KB @ 36.57 dB → 466 KB @
+  38.82 dB (+2.25 dB PSNR-Y, +0.008 SSIM-Y); drone 240 KB @ 37.89 → 403 KB
+  @ 39.72. At equal quality tag-4 needs QF≈84-85 (~500-516 KB), so AQ is
+  ~10% smaller at the same PSNR-Y. The published sample evidence was
+  regenerated with the new default (BBB matrix and drone reports in
+  `samples/`). New differential check `node
+  experiments/check_profile_aq_vectors.js` (wired into CI) proves the
+  browser decoder reproduces the Rust encoder's tag-5 reconstruction
+  bit-for-bit.
 - Per-frame latency measurement: `asciline-server --latency-log` records
   `t_read/t_encode/t_send` per sent frame, `asciline-render --live
   --latency-log` records `t_recv/t_decode/t_render`, and

@@ -105,6 +105,13 @@ struct Args {
     /// EnvironmentFile / docker-compose `environment:`).
     #[arg(long, env = "ASCILINE_TOKEN", hide_env_values = true)]
     token: Option<String>,
+
+    /// Write per-frame latency timestamps (`frame_index t_read t_encode
+    /// t_send`, monotonic wall ns) to this file. Measurement only: join with
+    /// `asciline-render --live --latency-log` on the same host and run
+    /// `experiments/analyze_latency.py` for the percentile report.
+    #[arg(long)]
+    latency_log: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -260,6 +267,15 @@ fn main() -> Result<()> {
         anyhow::bail!("web/ assets not found (looked in {:?})", web_dir);
     }
 
+    let latency_log = match &args.latency_log {
+        Some(path) => {
+            let log = asciline::server::LatencyLog::open(path)
+                .map_err(|e| anyhow::anyhow!("--latency-log {path:?}: {e}"))?;
+            Some(Arc::new(std::sync::Mutex::new(log)))
+        }
+        None => None,
+    };
+
     let state = AppState {
         queue,
         current_index: Arc::new(AtomicUsize::new(0)),
@@ -273,6 +289,7 @@ fn main() -> Result<()> {
         client_permits: Arc::new(tokio::sync::Semaphore::new(args.max_clients.max(1))),
         max_clients: args.max_clients.max(1),
         ffmpeg_permits: Arc::new(tokio::sync::Semaphore::new(args.max_ffmpeg.max(1))),
+        latency_log,
         token,
     };
     if state.token.is_some() {

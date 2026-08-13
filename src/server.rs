@@ -46,6 +46,73 @@ use crate::video::{probe_video, FrameReader, SourceParams};
 // App state
 // ────────────────────────────────────────────────────────────────────────────
 
+/// Measurement-only per-frame latency logger (`--latency-log <path>`).
+///
+/// Each record is `frame_index t_read t_encode t_send` in nanoseconds. The
+/// timestamps are the monotonic clock converted to wall-clock nanos once at
+/// construction, so logs from the server and a client on the *same host*
+/// (localhost) are directly comparable and robust to NTP jumps. See
+/// `experiments/analyze_latency.py` for the join + percentile report.
+pub struct LatencyLog {
+    w: std::io::BufWriter<std::fs::File>,
+    mono0: std::time::Instant,
+    wall0_ns: u128,
+    lines: usize,
+}
+
+impl LatencyLog {
+    pub fn open(path: &str) -> std::io::Result<LatencyLog> {
+        Ok(LatencyLog {
+            w: std::io::BufWriter::new(std::fs::File::create(path)?),
+            mono0: std::time::Instant::now(),
+            wall0_ns: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            lines: 0,
+        })
+    }
+
+    /// Record one sent frame; `t_*` are `Instant`s taken around read/encode/send.
+    pub fn record(
+        &mut self,
+        index: u32,
+        t_read: std::time::Instant,
+        t_encode: std::time::Instant,
+        t_send: std::time::Instant,
+    ) {
+        use std::io::Write;
+        let ns = |t: std::time::Instant| self.wall0_ns + t.duration_since(self.mono0).as_nanos();
+        let _ = writeln!(
+            self.w,
+            "{index} {} {} {}",
+            ns(t_read),
+            ns(t_encode),
+            ns(t_send)
+        );
+        self.lines += 1;
+        // Flush every record: this is a measurement log, so a record that sits
+        // in the BufWriter when the process is killed (e.g. the measurement
+        // script SIGTERMs the server after the client finishes) is silently
+        // lost and skews the join against the client's complete log. ~120
+        // writes/sec is negligible; correctness of the log matters more.
+        let _ = self.w.flush();
+    }
+
+    pub fn flush(&mut self) {
+        use std::io::Write;
+        let _ = self.w.flush();
+    }
+}
+
+impl std::fmt::Debug for LatencyLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LatencyLog")
+            .field("lines", &self.lines)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ScrubSprite {
     pub meta: serde_json::Value,
@@ -72,6 +139,8 @@ pub struct AppState {
     /// The configured connection cap (mirrors `client_permits`' initial value
     /// so `/healthz` can report capacity without a semaphore introspection API).
     pub max_clients: usize,
+    /// Per-frame latency logger (`--latency-log`); `None` when not measuring.
+    pub latency_log: Option<Arc<Mutex<LatencyLog>>>,
     /// Bounds concurrent ffmpeg spawns for `/audio` transcodes and scrub-sprite
     /// builds (a loop hitting `/audio` would otherwise spawn one process each).
     pub ffmpeg_permits: Arc<tokio::sync::Semaphore>,
@@ -800,6 +869,7 @@ async fn run_stream(
 
     let queue = state.queue.clone();
     let mut queue_index = 0usize;
+    let latency_log = state.latency_log.clone();
 
     if queue.is_empty() {
         let _ = sink
@@ -1112,6 +1182,9 @@ async fn run_stream(
             }
 
             // ── map + encode on the blocking pool (CPU) ──
+            // (latency measurement: t_read = frame available server-side,
+            //  t_encode = encode done, t_send = handed to the socket)
+            let t_read = std::time::Instant::now();
             let t0 = tokio::time::Instant::now();
             let st = pipeline.state.clone();
             let index = frame_index;
@@ -1125,6 +1198,7 @@ async fn run_stream(
                 Ok(o) => o,
                 Err(_) => break 'stream,
             };
+            let t_encode = std::time::Instant::now();
 
             // Webcam safety net: avoid 100% CPU when v4l2 returns instantly.
             if is_webcam && t0.elapsed().as_secs_f64() < 0.005 {
@@ -1149,6 +1223,12 @@ async fn run_stream(
                     };
                     if sent.is_err() {
                         break 'stream;
+                    }
+                    let t_send = std::time::Instant::now();
+                    if let Some(lat) = &latency_log {
+                        if let Ok(mut l) = lat.lock() {
+                            l.record(index, t_read, t_encode, t_send);
+                        }
                     }
                     bw_bytes += wire_size as u64;
                     bw_raw += raw_size as u64;
@@ -1196,4 +1276,9 @@ async fn run_stream(
 
     let _ = sink.close().await;
     recv_task.abort();
+    if let Some(lat) = &latency_log {
+        if let Ok(mut l) = lat.lock() {
+            l.flush();
+        }
+    }
 }

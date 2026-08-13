@@ -57,6 +57,56 @@ struct Args {
     /// Stop after this many frames (live mode).
     #[arg(long)]
     max_frames: Option<u32>,
+    /// Write per-frame latency timestamps (`frame_index t_recv t_decode
+    /// t_render`, monotonic wall ns) to this file (live mode). Join with the
+    /// server's `--latency-log` on the same host via
+    /// `experiments/analyze_latency.py`.
+    #[arg(long)]
+    latency_log: Option<String>,
+}
+
+/// Measurement-only per-frame latency logger (mirror of the server's; the
+/// timestamps are comparable across processes on the same host — see the
+/// `LatencyLog` docs in `src/server.rs`).
+struct ClientLatencyLog {
+    w: std::io::BufWriter<std::fs::File>,
+    mono0: Instant,
+    wall0_ns: u128,
+}
+
+impl ClientLatencyLog {
+    fn open(path: &str) -> Result<ClientLatencyLog> {
+        Ok(ClientLatencyLog {
+            w: std::io::BufWriter::new(
+                std::fs::File::create(path).with_context(|| format!("--latency-log {path:?}"))?,
+            ),
+            mono0: Instant::now(),
+            wall0_ns: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        })
+    }
+
+    fn record(&mut self, index: u32, t_recv: Instant, t_decode: Instant, t_render: Instant) {
+        use std::io::Write;
+        let ns = |t: Instant| self.wall0_ns + t.duration_since(self.mono0).as_nanos();
+        let _ = writeln!(
+            self.w,
+            "{index} {} {} {}",
+            ns(t_recv),
+            ns(t_decode),
+            ns(t_render)
+        );
+        // Flush every record (see the server's `LatencyLog`): a measurement
+        // log that loses its tail on process exit corrupts the join.
+        let _ = self.w.flush();
+    }
+
+    fn flush(&mut self) {
+        use std::io::Write;
+        let _ = self.w.flush();
+    }
 }
 
 fn main() -> Result<()> {
@@ -169,6 +219,10 @@ fn live_render(url: &str, args: &Args) -> Result<()> {
         let mut pdec = ProfileDecoder::new();
         let mut n = 0u32;
         let t0 = Instant::now();
+        let mut lat = match &args.latency_log {
+            Some(p) => Some(ClientLatencyLog::open(p)?),
+            None => None,
+        };
 
         while let Some(msg) = ws.next().await {
             let msg = msg.context("ws read")?;
@@ -205,20 +259,26 @@ fn live_render(url: &str, args: &Args) -> Result<()> {
                     if h.mode == 1 {
                         continue; // plain-text record, not a video frame
                     }
-                    let frame: Vec<u8> = if h.pixel {
+                    let t_recv = Instant::now();
+                    let (idx, frame): (u32, Vec<u8>) = if h.pixel {
                         // pixel mode bypasses the codec: raw frames are
                         // [u32 BE index][BGR payload] with no tag byte
                         if b.len() != 4 + h.cols * h.rows * h.cell_bytes {
                             bail!("live frame: {} bytes != 4 + {}x{}x{}", b.len(), h.cols, h.rows, h.cell_bytes);
                         }
-                        b[4..].to_vec()
+                        (u32::from_be_bytes([b[0], b[1], b[2], b[3]]), b[4..].to_vec())
                     } else if b.len() >= 5 && b[4] == TAG_PROFILE {
-                        pdec.decode(&b)?.1
+                        pdec.decode(&b)?
                     } else {
-                        adec.as_mut().unwrap().decode(&b)?.1
+                        adec.as_mut().unwrap().decode(&b)?
                     };
+                    let t_decode = Instant::now();
                     let ppm = rasterize(&frame, h.cols, h.rows, h.cell_bytes, h.scale, h.pixel);
                     fs::write(Path::new(&args.out).join(format!("frame_{n:06}.ppm")), &ppm)?;
+                    let t_render = Instant::now();
+                    if let Some(l) = &mut lat {
+                        l.record(idx, t_recv, t_decode, t_render);
+                    }
                     n += 1;
                     if let Some(max) = args.max_frames {
                         if n >= max {
@@ -239,6 +299,9 @@ fn live_render(url: &str, args: &Args) -> Result<()> {
             "live capture: {n} frames in {dt:.2}s -> {:.1} fps ({img_w}x{img_h} per frame)",
             n as f64 / dt.max(1e-9)
         );
+        if let Some(l) = &mut lat {
+            l.flush();
+        }
         Ok(())
     })
 }

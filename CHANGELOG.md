@@ -8,6 +8,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
 
 ### Added
 
+- Per-frame latency measurement: `asciline-server --latency-log` records
+  `t_read/t_encode/t_send` per sent frame, `asciline-render --live
+  --latency-log` records `t_recv/t_decode/t_render`, and
+  `experiments/analyze_latency.py` joins the two logs and reports a stage
+  breakdown with p50/p95/p99/max (`experiments/measure_latency.sh` runs the
+  whole measurement). Measured at 120 fps (240-col pixel, 720 frames, 720/720
+  joined): **p95 end-to-end latency 5.74 ms** — under the 8.33 ms per-frame
+  budget at 120 fps. Both loggers flush per record so a killed process can't
+  silently drop its tail (fixed a 640-vs-720 log mismatch this caught).
 - `asciline-render --live`: a WebSocket capture mode that records the real
   wire frames `asciline-server` sends (INIT + every frame) and rasterizes
   them, turning a live stream into video — the basis for the 120 fps proof.

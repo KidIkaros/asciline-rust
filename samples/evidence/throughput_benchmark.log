@@ -1,0 +1,42 @@
+ASCILINE-Rust unique-frame throughput benchmark
+Grid: 240x135; duration: 4s; source: deterministic ffmpeg testsrc2
+A unique hash count equal to source frames prevents duplicated 60fps content from masquerading as 120fps input.
+
+=== target 60 fps ===
+INIT: fps=60.0 mode=6 grid=240x135
+frames in 5.0s: 240 → 48.0 fps
+source frames: 240
+unique source hashes: 240
+server-sent frames: 240
+timestamp-derived wire rate: 61.9 fps
+
+=== target 120 fps ===
+live INIT: fps=120 mode=6 grid=240x135 pixel=true -> 480x270
+live capture: 480 frames in 4.11s -> 116.9 fps (480x270 per frame)
+source frames: 480
+unique source hashes: 480
+server-sent frames: 480
+timestamp-derived wire rate: 124.9 fps
+
+=== target 240 fps ===
+INIT: fps=240.0 mode=6 grid=240x135
+frames in 5.0s: 960 → 192.0 fps
+source frames: 960
+unique source hashes: 960
+server-sent frames: 960
+timestamp-derived wire rate: 249.3 fps
+
+=== target 480 fps ===
+INIT: fps=480.0 mode=6 grid=240x135
+frames in 5.0s: 1920 → 384.0 fps
+source frames: 1920
+unique source hashes: 1920
+server-sent frames: 1920
+timestamp-derived wire rate: 494.7 fps
+
+
+Interpretation:
+- The source has a unique framemd5 for every frame; no duplicated 60fps source is used.
+- Server-sent count equals the complete source count at each tested rate.
+- `throughput_120fps.mp4` and `.gif` are visual wire captures; their playback rate is not the measurement.
+- The timestamp-derived rates are machine measurements, not an unlimited performance guarantee.

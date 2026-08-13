@@ -25,10 +25,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
   CC BY 3.0, attribution/checksums in `samples/SOURCE.md`). New evidence in
   `samples/evidence/` includes GitHub-inline GIFs for SOURCE | PIXEL |
   PROFILE, a profile-only playback, an explicitly amplified difference view,
-  full-resolution MP4 versions, and a live cartoon wire capture. The 120 fps
-  capture contains 480 frames at a measured 115.6 fps with a 120 fps target;
-  its log is the authoritative transport evidence. `make_samples.sh` verifies
-  the committed source hashes before regenerating all artifacts.
+  full-resolution MP4 versions, a QF 40/70/90 quality matrix, large/detail
+  comparisons, and a live cartoon wire capture. The wire capture contains 480
+  frames at a measured 115.6 fps with a 120 fps target from a real 60 fps source;
+  its log is the authoritative **transport throughput** evidence, not a claim
+  of 120 unique source frames. `make_samples.sh` verifies the committed source
+  hashes before regenerating all artifacts.
+- Unique-frame throughput proof: `experiments/measure_throughput.sh` generates
+  deterministic 60/120/240/480 fps sources, verifies every source frame has a
+  distinct `framemd5`, counts every server-sent frame, and records the
+  timestamp-derived wire rate. The measured run delivered 480/960/1920 unique
+  frames at 124.9/249.3/494.7 fps respectively; `throughput_120fps.mp4` and
+  `.gif` capture the actual 120 fps wire frames for visual inspection. This is
+  a benchmark result, not an unlimited-machine guarantee.
 - `tests/load_server.rs` — a real-binary concurrent load test proving
   `--max-clients` under contention (both in-cap clients stream, `/healthz`
   reports the exact in-use count, the overflow connection is rejected, and a

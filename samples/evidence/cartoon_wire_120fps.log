@@ -1,0 +1,11 @@
+== fps_count.js — browser-like WS frame counter ==
+INIT: fps=120.0 mode=6 grid=240x135
+frames in 3.0s: 351 → 117.0 fps
+
+== asciline-render --live — wire capture ==
+live INIT: fps=120 mode=6 grid=240x135 pixel=true -> 480x270
+live capture: 480 frames in 4.14s -> 116.1 fps (480x270 per frame)
+
+Source content frames: 240 at 60 fps
+Server target: 120 fps; wire capture is transport throughput, not 120 unique source frames.
+The GIF is illustrative. The frame count/rate log is the authoritative wire evidence.

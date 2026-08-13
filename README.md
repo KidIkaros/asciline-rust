@@ -18,15 +18,20 @@ Beyond the port itself, this answers the question *"can ASCILINE run faster than
 
 - the Python server hard-caps every source to ≤30 fps (`MAX_FPS = 30` + frame
   skipping) and runs decode → map → encode → send serially under the GIL;
-- the Rust server has **no fps cap** (sources play at native rate, `--fps N` for
-  any target), pipelines decode (dedicated thread) against map/encode (tokio
-  blocking pool) and the WebSocket send, does the resize/decimation inside
-  ffmpeg's SIMD filters, and parallelizes mapping over rows with rayon.
+- the Rust server has **no hard-coded 30 fps cap** (sources play at native
+  rate, `--fps N` accepts any target), pipelines decode (dedicated thread)
+  against map/encode (tokio blocking pool) and the WebSocket send, does the
+  resize/decimation inside ffmpeg's SIMD filters, and parallelizes mapping over
+  rows with rayon. There is no universal infinite-FPS guarantee: the practical
+  ceiling depends on source decode, grid size, codec mode, CPU, and network.
+  The published unique-frame benchmark reaches approximately 125/249/495 fps
+  at 120/240/480 fps targets on this machine.
 
 Measured on a 60 fps source, `asciline-server --fps 60` streams **59.3 fps**,
 and the map+encode stage alone runs at a **~3,600 fps ceiling** at 240×67
-(2.7× faster than the equivalent numpy+codec.py work). Details and tables:
-**[PERF_ANALYSIS.md](PERF_ANALYSIS.md)**.
+(2.7× faster than the equivalent numpy+codec.py work). The high-rate unique-
+frame throughput evidence is in the [sample benchmark](#unique-frame-throughput-proof);
+details and tables are in **[PERF_ANALYSIS.md](PERF_ANALYSIS.md)**.
 
 ## Requirements
 
@@ -262,9 +267,16 @@ checksums are in [`samples/SOURCE.md`](samples/SOURCE.md).
 | <img src="samples/images/cartoon_profile.png" width="400" alt="Big Buck Bunny profile mode"/> | `--profile` lossy DCT, QF=70 | `samples/big_buck_bunny_profile.ascf` |
 
 The GitHub-native animated comparison is below. It uses the same cartoon
-frame in all three panels and is intentionally large enough to inspect:
+frames in all three panels:
 
 <img src="samples/evidence/cartoon_compare.gif" width="960" alt="Big Buck Bunny source, lossless pixel, and lossy profile comparison"/>
+
+For a less compressed view, use the larger two-panel comparison and center-detail
+inspection:
+
+<img src="samples/evidence/cartoon_source_profile_large.gif" width="960" alt="Large Big Buck Bunny source and profile comparison"/>
+
+<img src="samples/evidence/cartoon_detail_compare.gif" width="960" alt="Big Buck Bunny center detail source and profile comparison"/>
 
 Play the samples yourself:
 
@@ -280,6 +292,16 @@ while using substantially fewer bytes — **9.78 MB lossless pixel → 346 KB
 profile (~28× smaller)** on this 8-second excerpt. The exact PSNR/SSIM report, including
 the worst frame, is in
 [`samples/big_buck_bunny_profile_quality.txt`](samples/big_buck_bunny_profile_quality.txt).
+The QF=40/70/90 size-quality trade-off is:
+
+| QF | Profile size | Pixel/profile | PSNR-Y | SSIM-Y | PSNR-RGB |
+|---:|---:|---:|---:|---:|---:|
+| 40 | 216,929 B | 45.1× | 33.80 dB | 0.9432 | 30.21 dB |
+| 70 | 346,405 B | 28.2× | 36.47 dB | 0.9670 | 32.13 dB |
+| 90 | 684,437 B | 14.3× | 41.14 dB | 0.9861 | 34.57 dB |
+
+The generated matrix is also available at
+[`samples/big_buck_bunny_quality_matrix.md`](samples/big_buck_bunny_quality_matrix.md).
 The stills above are decoded frames — exactly what `asciline-player` and the
 browser decoder render, not screenshots of an internal encoder buffer.
 
@@ -291,26 +313,47 @@ these GIFs are the versions GitHub can display inline:
 - <img src="samples/evidence/cartoon_profile.gif" width="560" alt="Big Buck Bunny profile-only playback"/>
 - <img src="samples/evidence/cartoon_difference.gif" width="960" alt="Big Buck Bunny amplified difference"/>
 
+See [`samples/README.md`](samples/README.md) for an evidence guide,
+quality-metric definitions, and reproduction methodology.
+
 | Video | What it shows |
 | :--- | :--- |
 | [`samples/evidence/cartoon_compare.mp4`](samples/evidence/cartoon_compare.mp4) | SOURCE \| PIXEL \| PROFILE side-by-side at **240 columns** (3× the still resolution), 30 fps, labels + measured PSNR burned into each frame |
 | [`samples/evidence/cartoon_profile.mp4`](samples/evidence/cartoon_profile.mp4) | profile-only reconstruction at 30 fps |
 | [`samples/evidence/cartoon_difference.mp4`](samples/evidence/cartoon_difference.mp4) | source, profile, and explicitly 4× amplified difference panels |
-| [`samples/evidence/cartoon_120fps.mp4`](samples/evidence/cartoon_120fps.mp4) | the actual WebSocket wire frames captured live from `asciline-server` — 480 frames at a measured 115.6 fps with a 120 fps target |
+| [`samples/evidence/cartoon_wire_120fps.mp4`](samples/evidence/cartoon_wire_120fps.mp4) | actual WebSocket wire frames from 60 fps cartoon content, useful as a transport illustration |
 
-The 120 fps clip is a visual capture of the actual WebSocket frames from
-`asciline-server`; the authoritative measurements are in
-[`samples/evidence/cartoon_120fps.log`](samples/evidence/cartoon_120fps.log).
-It uses a real 60 fps Big Buck Bunny source with a 120 fps server target. The
-frame counter and measured wire rate are burned into the MP4. Browser playback
-cannot itself prove 120 fps, so the log is the evidence for the transport rate:
+### Unique-frame throughput proof
 
-See the log for the exact frame count and rate from the current run. The
-comparison GIFs are deliberately 10 fps for browser/file-size compatibility;
-they are visual evidence of quality, not a claim about GIF playback rate.
+The visual and numerical proof for the substantial FPS claim is separate from
+cartoon quality. The inline GIF shows actual wire frames from a genuine 120 fps
+source with a live wire-frame counter:
 
-The samples are committed; regenerate them anytime with
-`experiments/make_samples.sh`.
+<img src="samples/evidence/throughput_120fps.gif" width="800" alt="Unique 120 fps source captured from the ASCILINE wire"/>
+
+The full MP4 is [`throughput_120fps.mp4`](samples/evidence/throughput_120fps.mp4).
+
+Every source frame is checked with `framemd5`, and the benchmark records source
+frames, unique hashes, server-sent frames, and timestamp-derived wire rate:
+
+| Target | Unique source frames | Server sent | Measured wire rate |
+|---:|---:|---:|---:|
+| 60 | 240 | 240 | 61.9 fps |
+| 120 | 480 | 480 | 124.9 fps |
+| 240 | 960 | 960 | 249.3 fps |
+| 480 | 1,920 | 1,920 | 494.7 fps |
+
+This proves the current machine delivered **unique frames above 60 fps**,
+including 120/240/480 fps targets. It is a measured benchmark, not an
+unlimited guarantee on every machine; the practical ceiling depends on source
+decode, grid size, codec mode, CPU, and network. Full methodology and logs:
+[`samples/README.md`](samples/README.md),
+[`samples/evidence/throughput_matrix.md`](samples/evidence/throughput_matrix.md),
+and [`samples/evidence/throughput_benchmark.log`](samples/evidence/throughput_benchmark.log).
+
+The samples are committed; regenerate visual quality artifacts with
+`experiments/make_samples.sh` and throughput artifacts with
+`experiments/measure_throughput.sh`.
 
 ## Architecture
 

@@ -190,6 +190,52 @@ jobs:
           fi
           echo "differential vectors are byte-reproducible"
 
+  samples-check:
+    name: Sample evidence artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install ffmpeg (artifact metadata checks)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Validate pinned sources and published evidence
+        run: |
+          set -euo pipefail
+          sha256sum -c <(printf '%s  %s\\n' \\
+            '8f113ef593688f47ec8d8b0d093fb955cb04bc350826c775d2e9ca451870856e' \\
+            samples/source/big_buck_bunny_excerpt_30fps.mp4; \\
+            printf '%s  %s\\n' \\
+            '1cf8e47cdef1c3acb4cab994a463a0ca6dabe1532bc89f09f90873dae45e98e8' \\
+            samples/source/big_buck_bunny_excerpt_60fps.mp4)
+          test ! -e samples/mandelbrot_profile.ascf
+          test ! -e samples/evidence/stream_120fps.mp4
+          for f in \\
+            samples/evidence/cartoon_compare.gif \\
+            samples/evidence/cartoon_profile.gif \\
+            samples/evidence/cartoon_difference.gif \\
+            samples/evidence/cartoon_source_profile_large.gif \\
+            samples/evidence/cartoon_detail_compare.gif \\
+            samples/evidence/throughput_120fps.gif; do
+            test -f "$f"
+            test "$(stat -c %s "$f")" -lt 10000000
+          done
+          for f in samples/evidence/*.mp4; do
+            test -n "$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$f")"
+          done
+          test "$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 samples/evidence/cartoon_compare.mp4)" = '30/1'
+          test "$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 samples/evidence/cartoon_wire_120fps.mp4)" = '120/1'
+          test "$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 samples/evidence/throughput_120fps.mp4)" = '120/1'
+          grep -q '| 120 | 480 | 480 |' samples/evidence/throughput_matrix.md
+          grep -q 'unique source hashes: 480' samples/evidence/throughput_benchmark.log
+          if grep -RInE 'mandelbrot_|stream_120fps|quality_compare|pixel\\.gif' README.md samples CHANGELOG.md; then
+            echo 'stale synthetic evidence reference found' >&2
+            exit 1
+          fi
+          echo 'sample evidence artifacts are present, licensed, and valid'
+
   security-audit:
     name: Security audit (cargo-audit)
     runs-on: ubuntu-latest

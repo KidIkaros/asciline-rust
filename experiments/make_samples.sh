@@ -31,32 +31,58 @@ mkdir -p samples/images samples/evidence
 # ── compile the actual cartoon through all three ASCILINE formats ──
 "$BIN" "$SOURCE30" --cols 240 --mode 4 --out "$TMP/ascii" >/dev/null
 "$BIN" "$SOURCE30" --cols 240 --pixel --out "$TMP/pixel" >/dev/null
-"$BIN" "$SOURCE30" --cols 240 --profile --qf 70 --out "$TMP/profile" > "$TMP/profile_report.txt" 2>&1
+for QF in 40 70 90; do
+    "$BIN" "$SOURCE30" --cols 240 --profile --qf "$QF" --out "$TMP/profile_qf$QF" \
+        > "$TMP/profile_qf${QF}_report.txt" 2>&1
+done
+PROFILE="$TMP/profile_qf70.ascf"
+PROFILE_REPORT="$TMP/profile_qf70_report.txt"
 
 # ── source and decoded stills: the exact same frame, not a synthetic pattern ──
 FRAME=90
 ffmpeg -y -v error -ss 3 -i "$SOURCE30" -frames:v 1 samples/images/cartoon_source.png
 "$RENDER" "$TMP/ascii.ascf" --out "$TMP/r_ascii" --frame "$FRAME" >/dev/null
 "$RENDER" "$TMP/pixel.ascf" --out "$TMP/r_pixel" --scale 2 --frame "$FRAME" >/dev/null
-"$RENDER" "$TMP/profile.ascf" --out "$TMP/r_profile" --scale 2 --frame "$FRAME" >/dev/null
+"$RENDER" "$PROFILE" --out "$TMP/r_profile" --scale 2 --frame "$FRAME" >/dev/null
 ffmpeg -y -v error -i "$TMP/r_ascii/frame_000090.ppm" samples/images/cartoon_ascii.png
 ffmpeg -y -v error -i "$TMP/r_pixel/frame_000090.ppm" samples/images/cartoon_pixel.png
 ffmpeg -y -v error -i "$TMP/r_profile/frame_000090.ppm" samples/images/cartoon_profile.png
-grep -A8 '\[Quality\]' "$TMP/profile_report.txt" > samples/big_buck_bunny_profile_quality.txt || true
+grep -A8 '\[Quality\]' "$PROFILE_REPORT" > samples/big_buck_bunny_profile_quality.txt || true
 cp "$TMP/ascii.ascf" samples/big_buck_bunny_ascii.ascf
 cp "$TMP/pixel.ascf" samples/big_buck_bunny_pixel.ascf
-cp "$TMP/profile.ascf" samples/big_buck_bunny_profile.ascf
+cp "$PROFILE" samples/big_buck_bunny_profile.ascf
+PIXEL_SIZE=$(stat -c %s "$TMP/pixel.ascf")
+{
+    echo '# Big Buck Bunny profile quality matrix'
+    echo
+    echo '| QF | Profile size | Pixel/profile ratio | PSNR-Y | SSIM-Y | PSNR-RGB |'
+    echo '|---:|---:|---:|---:|---:|---:|'
+    for QF in 40 70 90; do
+        SIZE=$(stat -c %s "$TMP/profile_qf$QF.ascf")
+        REPORT="$TMP/profile_qf${QF}_report.txt"
+        PSNR=$(grep 'PSNR-Y' "$REPORT" | head -1 | awk '{print $3}')
+        SSIM=$(grep 'SSIM-Y' "$REPORT" | head -1 | awk '{print $3}')
+        RGB=$(grep 'PSNR-RGB' "$REPORT" | head -1 | awk '{print $3}')
+        RATIO=$(python3 - "$PIXEL_SIZE" "$SIZE" <<'PY'
+import sys
+print(f"{int(sys.argv[1]) / int(sys.argv[2]):.1f}x")
+PY
+)
+        printf '| %s | %s B | %s | %s dB | %s | %s dB |\n' "$QF" "$SIZE" "$RATIO" "$PSNR" "$SSIM" "$RGB"
+    done
+} > samples/big_buck_bunny_quality_matrix.md
 
 # ── render all decoded frames once for the GIFs and comparison MP4 ──
 "$RENDER" "$TMP/pixel.ascf" --out "$TMP/r_pixel_all" --scale 2 >/dev/null
-"$RENDER" "$TMP/profile.ascf" --out "$TMP/r_profile_all" --scale 2 >/dev/null
+"$RENDER" "$PROFILE" --out "$TMP/r_profile_all" --scale 2 >/dev/null
+"$RENDER" "$PROFILE" --out "$TMP/r_profile_large" --scale 3 >/dev/null
 ffmpeg -y -v error -i "$SOURCE30" -vf scale=480:270 -start_number 0 "$TMP/source_%06d.ppm"
 
 # Source/pixel/profile are padded to the same 480x288 panel. The difference
 # panel is deliberately amplified and explicitly labeled; it is not presented
 # as ordinary displayed output.
-PSNR_Y=$(grep 'PSNR-Y' "$TMP/profile_report.txt" | head -1 | awk '{print $3}')
-PROFILE_SIZE=$(stat -c %s "$TMP/profile.ascf")
+PSNR_Y=$(grep 'PSNR-Y' "$PROFILE_REPORT" | head -1 | awk '{print $3}')
+PROFILE_SIZE=$(stat -c %s "$PROFILE")
 PIXEL_SIZE=$(stat -c %s "$TMP/pixel.ascf")
 RATIO=$(python3 - "$PIXEL_SIZE" "$PROFILE_SIZE" <<'PY'
 import sys
@@ -75,9 +101,45 @@ ffmpeg -y -v error \
     -filter_complex "$FILTER" -map '[v]' -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
     samples/evidence/cartoon_compare.mp4
 
+# ── large source/profile inspection ──
+# The overview GIF has three panels. This two-panel artifact keeps each image
+# at a readable 720×405-ish size for judging faces, fur, foliage, and edges.
+ffmpeg -y -v error -i "$SOURCE30" -vf scale=720:405 -start_number 0 "$TMP/source_large_%06d.ppm"
+ffmpeg -y -v error \
+    -framerate 30 -i "$TMP/source_large_%06d.ppm" \
+    -framerate 30 -i "$TMP/r_profile_large/frame_%06d.ppm" \
+    -filter_complex "\
+      [0:v]pad=720:432:0:13:color=black,drawtext=$LBL:text='SOURCE  Big Buck Bunny':x=12:y=12[a];\
+      [1:v]drawtext=$LBL:text='PROFILE  QF=70  PSNR-Y ${PSNR_Y} dB':x=12:y=12[b];\
+      [a][b]hstack,drawtext=$LBL:text='source vs displayed profile  |  frame %{n}  |  30 fps':x=12:y=h-38[v]" \
+    -map '[v]' -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
+    samples/evidence/cartoon_source_profile_large.mp4
+ffmpeg -y -v error -i samples/evidence/cartoon_source_profile_large.mp4 \
+    -vf 'fps=5,scale=960:-1:flags=lanczos,palettegen=stats_mode=diff' "$TMP/large_palette.png"
+ffmpeg -y -v error -i samples/evidence/cartoon_source_profile_large.mp4 -i "$TMP/large_palette.png" \
+    -lavfi 'fps=5,scale=960:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a' -loop 0 \
+    samples/evidence/cartoon_source_profile_large.gif
+
+# Center-detail crop: a second view for spotting ringing, chroma edges, and
+# texture changes without shrinking the whole frame into three columns.
+ffmpeg -y -v error \
+    -framerate 30 -i "$TMP/source_large_%06d.ppm" \
+    -framerate 30 -i "$TMP/r_profile_large/frame_%06d.ppm" \
+    -filter_complex "\
+      [0:v]crop=360:202:180:13,scale=640:360:flags=lanczos,drawtext=$LBL:text='SOURCE  center detail':x=12:y=12[a];\
+      [1:v]crop=360:202:180:0,scale=640:360:flags=lanczos,drawtext=$LBL:text='PROFILE  QF=70  center detail':x=12:y=12[b];\
+      [a][b]hstack,drawtext=$LBL:text='detail inspection  |  differences are not amplified':x=12:y=h-38[v]" \
+    -map '[v]' -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
+    samples/evidence/cartoon_detail_compare.mp4
+ffmpeg -y -v error -i samples/evidence/cartoon_detail_compare.mp4 \
+    -vf 'fps=5,scale=960:-1:flags=lanczos,palettegen=stats_mode=diff' "$TMP/detail_palette.png"
+ffmpeg -y -v error -i samples/evidence/cartoon_detail_compare.mp4 -i "$TMP/detail_palette.png" \
+    -lavfi 'fps=5,scale=960:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a' -loop 0 \
+    samples/evidence/cartoon_detail_compare.gif
+
 # GitHub embeds GIFs reliably; MP4 remains available as the full-resolution
-# download. GIFs are 15 fps for browser compatibility, but retain every second
-# source frame and are large enough to judge faces, fur, foliage, and edges.
+# download. GIFs use 10 fps for browser compatibility and file size, while the
+# MP4s retain the original 30 fps.
 ffmpeg -y -v error -i samples/evidence/cartoon_compare.mp4 \
     -vf 'fps=10,scale=800:-1:flags=lanczos,palettegen=stats_mode=diff' "$TMP/compare_palette.png"
 ffmpeg -y -v error -i samples/evidence/cartoon_compare.mp4 -i "$TMP/compare_palette.png" \
@@ -125,6 +187,8 @@ node experiments/fps_count.js "$PORT" 3 > "$TMP/fps.log" 2>&1
     --scale 2 --max-frames 480 > "$TMP/live.log" 2>&1
 cleanup_server
 LIVE_FPS=$(grep -oE '[0-9.]+ fps' "$TMP/live.log" | tail -1 | sed 's/ fps//')
+SOURCE60_FRAMES=$(ffprobe -v error -count_frames -select_streams v:0 \
+    -show_entries stream=nb_read_frames -of csv=p=0 "$SOURCE60")
 {
     echo '== fps_count.js — browser-like WS frame counter =='
     cat "$TMP/fps.log"
@@ -132,12 +196,13 @@ LIVE_FPS=$(grep -oE '[0-9.]+ fps' "$TMP/live.log" | tail -1 | sed 's/ fps//')
     echo '== asciline-render --live — wire capture =='
     cat "$TMP/live.log"
     echo
-    echo 'Note: the pinned cartoon source is 60 fps; the server target is 120 fps.'
+    echo "Source content frames: ${SOURCE60_FRAMES} at 60 fps"
+    echo 'Server target: 120 fps; wire capture is transport throughput, not 120 unique source frames.'
     echo 'The GIF is illustrative. The frame count/rate log is the authoritative wire evidence.'
-} > samples/evidence/cartoon_120fps.log
+} > samples/evidence/cartoon_wire_120fps.log
 ffmpeg -y -v error -framerate 120 -i "$TMP/r_live/frame_%06d.ppm" \
     -vf "drawtext=$LBL:text='ASCILINE-RS LIVE  Big Buck Bunny  60 fps source  120 fps target  measured ${LIVE_FPS} fps':x=10:y=10,drawtext=$LBL:text='wire frame %{n}':x=w-160:y=10" \
-    -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p samples/evidence/cartoon_120fps.mp4
+    -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p samples/evidence/cartoon_wire_120fps.mp4
 
 cat > samples/SOURCE.md <<'EOF'
 # Evidence source and attribution

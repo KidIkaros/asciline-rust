@@ -43,9 +43,20 @@ jobs:
           cp install.sh                     dist/asciline-${TAG}-linux-x86_64/
           cp -r web                         dist/asciline-${TAG}-linux-x86_64/web
           cp -r deploy                      dist/asciline-${TAG}-linux-x86_64/deploy
+
+          # Evidence is a separate asset so users can download the visual
+          # proof without bloating the executable tarball.
+          mkdir -p dist/asciline-${TAG}-evidence
+          cp -r samples/evidence samples/images samples/source \
+            dist/asciline-${TAG}-evidence/
+          cp samples/*.ascf samples/*.md samples/*quality*.txt \
+            dist/asciline-${TAG}-evidence/
+
           cd dist
           tar czf asciline-${TAG}-linux-x86_64.tar.gz asciline-${TAG}-linux-x86_64/
+          tar czf asciline-${TAG}-evidence.tar.gz asciline-${TAG}-evidence/
           sha256sum asciline-${TAG}-linux-x86_64.tar.gz > checksums.txt
+          sha256sum asciline-${TAG}-evidence.tar.gz >> checksums.txt
           sha256sum asciline-${TAG}-linux-x86_64/asciline-server >> checksums.txt
           sha256sum asciline-${TAG}-linux-x86_64/asciline-player >> checksums.txt
           sha256sum asciline-${TAG}-linux-x86_64/asciline-compile >> checksums.txt

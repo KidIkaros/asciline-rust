@@ -88,9 +88,34 @@ frames in 3.0s: 178 → 59.3 fps
 ```
 
 The Rust server streams **59.3 fps** on the exact 60 fps source that the Python
-server would decimate to 30. `--fps 120` and beyond are equally supported.
+server would decimate to 30. `--fps 120` and beyond are supported, but there is
+no claim of an unlimited machine-independent ceiling.
 
-### 3c. Terminal player (real-time check)
+### 3c. Unique-frame throughput at high rates
+
+The high-rate benchmark uses deterministic `testsrc2` sources at each target
+rate. Before starting the server, every encoded source frame is hashed with
+`framemd5`; the unique-hash count must equal the source frame count. This rules
+out the common false positive where a 60 fps source is merely duplicated to
+pretend to be 120 fps. The server's flushed latency log is then counted and its
+send timestamps provide the measured wire rate.
+
+| target | source frames | unique hashes | server sent | measured wire |
+|---:|---:|---:|---:|---:|
+| 60 fps | 240 | 240 | 240 | **61.9 fps** |
+| 120 fps | 480 | 480 | 480 | **124.9 fps** |
+| 240 fps | 960 | 960 | 960 | **249.3 fps** |
+| 480 fps | 1,920 | 1,920 | 1,920 | **494.7 fps** |
+
+The 120 fps wire capture is published as
+`samples/evidence/throughput_120fps.mp4`/`.gif`; the full matrix and raw
+measurements are in `samples/evidence/throughput_matrix.md` and
+`samples/evidence/throughput_benchmark.log`. These are **measured results on
+this machine**, not an unlimited-performance guarantee: source codec, grid,
+mode, CPU, network, client, and scheduler determine the practical ceiling.
+Re-run with `experiments/measure_throughput.sh`.
+
+### 3d. Terminal player (real-time check)
 
 | run | wall time | video | verdict |
 |---|---|---|---|
@@ -98,7 +123,7 @@ server would decimate to 30. `--fps 120` and beyond are equally supported.
 | 480 cols @60 fps | 10.44 s | 10 s / 600 frames | real-time at 60 fps |
 | 720p source, 560 cols @60 fps | 5.31 s | 5 s / 300 frames | real-time at 60 fps |
 
-### 3d. End-to-end latency at 120 fps (frame in → wire out → decode → display)
+### 3e. End-to-end latency at 120 fps (frame in → wire out → decode → display)
 
 How *usable* is the frame rate? Measured with the built-in latency logging:
 `asciline-server --latency-log` records `t_read/t_encode/t_send` per frame,

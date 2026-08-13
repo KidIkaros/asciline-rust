@@ -289,6 +289,8 @@ node experiments/check_profile_vectors.js              # Rust ProfileEncoder ↔
 cargo test --test e2e_server -- --nocapture             # boots the real server, WS INIT + frames,
                                                          # plus the hardening guards (healthz, token 401s,
                                                          # --max-clients 503)
+cargo test --test load_server                           # --max-clients under real contention
+                                                         # (overflow rejected, slot reuse after disconnect)
 cargo test --test fuzz_malformed                        # proptest: no input may panic a decoder
 
 # libFuzzer harnesses (nightly + clang): the same guarantee with a mutation

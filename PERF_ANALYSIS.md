@@ -52,7 +52,7 @@ The result: on a typical machine the whole loop lands around 30 fps — hence th
 | Serial decode→map→encode→send | **Pipelined**: a dedicated OS thread decodes ffmpeg frames into a bounded channel while map+encode (tokio blocking pool) and the WebSocket send overlap it. |
 | Decode at full res, then resize | ffmpeg's `scale=` filter resizes **inside** ffmpeg (SIMD) — only the tiny `cols×rows×3` frame crosses the pipe. Decimation is ffmpeg's `fps=` filter, not manual `grab()` skipping. |
 | Python/Numpy per-frame overhead + GIL | Zero-copy-ish Rust loops, no interpreter; row-parallel mapping with rayon; autovectorized LUT lookups. |
-| zlib via CPython + re-allocated numpy buffers per frame | `flate2` (pure-Rust miniz) + reused scratch buffers; keyframe every 48 frames, delta-first adaptive codec by default. |
+| zlib via CPython + re-allocated numpy buffers per frame | `flate2` (pure-Rust miniz_oxide backend, no C deps) + reused scratch buffers; keyframe every 48 frames, delta-first adaptive codec by default. |
 | `sleep()` pacing in an asyncio loop | `tokio::time::sleep` on the async task only — the decode and encode threads never wait on it. |
 
 ## 3. Measured results (this machine: 12-core Ryzen, Linux, ffmpeg 6.1)
@@ -117,10 +117,20 @@ bit-exactness guarantees as everything else:
   per-pixel `rem_euclid` (~4× faster even single-threaded), and all five
   windowed moments (E[x], E[y], E[x²], E[y²], E[xy]) are batched into one
   parallel pass.
-- **zlib**: `flate2` now uses the `zlib-rs` backend (Cloudflare's memory-safe
-  pure-Rust zlib, no C deps) instead of miniz_oxide — faster deflate, same
-  wire format (the compressed bytes are different but equally valid zlib, and
-  decode compatibility is what the differential harnesses verify).
+- **zlib**: `flate2` runs on the default pure-Rust `miniz_oxide` backend.
+  Both miniz_oxide and zlib-rs (Cloudflare's memory-safe pure-Rust zlib) were
+  measured on real clips (`experiments/compare_zlib_backends.sh`), and
+  miniz_oxide won on the metric that matters for a codec container — size:
+
+  | mode (8 s 640×360 clip, 240 cols) | miniz_oxide | zlib-rs |
+  |---|---|---|
+  | adaptive pixel, tol=8 | **2,875,260 B** | 3,536,211 B (+23%) |
+  | profile QF=70 | 494,506 B | 493,160 B (≈equal) |
+
+  Speed was a wash (zlib isn't the dominant cost of either encode path), so
+  the default stays miniz_oxide. The wire bytes differ between backends but
+  are equally valid zlib streams — decode compatibility, which is what the
+  differential harnesses verify, is unaffected.
 
 Every one of these is verified **bit-identical to the serial build**: a
 thread-count determinism test (1 vs 8 threads), the cross-implementation
@@ -150,9 +160,12 @@ SSIM — the dominant per-frame cost. It now skips the computation entirely
   the practical ceiling is the client's canvas draw, not the server.
 - **`--quality high|balanced|low`** cuts wire bytes further via lossy temporal
   deltas (chars stay exact); bandwidth stops mattering before CPU does.
-- **SIMD / multithreaded zlib**: `zlib-rs` is already in; a parallel deflate
-  backend would help the (now relatively larger) serial zlib share of `--profile`
-  compiles, and the mapper is already row-parallel via rayon.
+- **SIMD / multithreaded zlib**: the serial zlib pass is a real share of
+  `--profile` compiles; a parallel deflate backend (zlib-rs or zlib-ng) would
+  shrink it, but the measured zlib-rs ratio cost (~23% larger adaptive files)
+  is why the default stays miniz_oxide — re-run
+  `experiments/compare_zlib_backends.sh` on your content before switching. The
+  mapper is already row-parallel via rayon.
 - **Hardware decode**: `ffmpeg -hwaccel auto` can be added to the decode args
   for machines with GPU decoders; the Rust side is not the bottleneck.
 

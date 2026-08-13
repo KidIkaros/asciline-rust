@@ -21,9 +21,11 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use asciline::codec::{CodecDecoder, MAX_DECOMPRESSED, TAG_PROFILE, TAG_PROFILE_AQ};
+use asciline::codec::{
+    CodecDecoder, MAX_DECOMPRESSED, TAG_PROFILE, TAG_PROFILE_AQ, TAG_PROFILE_HPEL,
+};
 use asciline::profile::ProfileDecoder;
-use asciline::protocol::{parse_ascf_header, ASCF_MAGIC_V2};
+use asciline::protocol::{parse_ascf_header, AscfSeekIndex, ASCF_MAGIC_V2};
 use clap::Parser;
 use font8x8::UnicodeFonts;
 use futures_util::StreamExt;
@@ -44,9 +46,15 @@ struct Args {
     /// Cell size in pixels (solid block for pixel mode, glyph scale for ASCII).
     #[arg(long)]
     scale: Option<u8>,
-    /// Render only this one frame (0-based), then stop.
+    /// Render only this one frame (0-based), then stop. Uses the .ascf seek
+    /// index to jump straight to the frame's keyframe instead of decoding
+    /// every earlier frame.
     #[arg(long)]
     frame: Option<u32>,
+    /// Start rendering from this time (seconds) instead of the beginning
+    /// (uses the .ascf seek index — nearest keyframe + forward decode).
+    #[arg(long, default_value_t = 0.0)]
+    seek: f64,
     /// Render a LIVE WebSocket stream instead of a file: connect, parse the
     /// INIT handshake, decode the binary frames as they arrive and write a
     /// PPM per frame (plus a measured-fps line on stderr). Use with a timeout
@@ -133,6 +141,34 @@ fn main() -> Result<()> {
     let header = parse_ascf_header(&header_bytes)?;
     let cell_bytes = if header.pixel { 3 } else { 4 };
     let (cols, rows) = (header.cols as usize, header.rows as usize);
+    let header_len: u64 = if is_v2 { 18 } else { 14 };
+
+    // ── seek index: jump to the keyframe at/before the target frame, then
+    //    decode forward (deterministic — same bytes as sequential playback). ──
+    let mut n = 0u32;
+    let mut written = 0u32;
+    let mut skip_until: Option<u32> = None;
+    if args.seek > 0.0 || args.frame.is_some() {
+        use std::io::{Seek, SeekFrom};
+        let target = match args.frame {
+            Some(f) => f,
+            None => (args.seek * header.fps as f64).round().max(0.0) as u32,
+        };
+        let idx = AscfSeekIndex::scan(&mut reader, header_len)
+            .with_context(|| format!("seek: cannot index {ascf:?}"))?;
+        match idx.floor(target) {
+            Some((kf, off)) => {
+                reader.seek(SeekFrom::Start(off))?;
+                n = kf;
+                skip_until = Some(target);
+                eprintln!("[Seek] frame {target}: jumped to keyframe {kf} @ {off}B");
+            }
+            None => eprintln!(
+                "[Seek] target {target} past end ({} frames)",
+                idx.total_frames
+            ),
+        }
+    }
     let scale = args.scale.unwrap_or(if header.pixel { 8 } else { 2 }) as usize;
     let (img_w, img_h) = (
         cols * cell_px(scale, header.pixel),
@@ -142,7 +178,6 @@ fn main() -> Result<()> {
 
     let mut adec = CodecDecoder::new(cell_bytes);
     let mut pdec = ProfileDecoder::new();
-    let mut n = 0u32;
 
     loop {
         let mut len_buf = [0u8; 4];
@@ -159,24 +194,40 @@ fn main() -> Result<()> {
         // mode 1 streams plain text (the live-server INIT path), never a frame
         let frame: Vec<u8> = if header.mode == 1 {
             continue;
-        } else if msg.len() >= 5 && (msg[4] == TAG_PROFILE || msg[4] == TAG_PROFILE_AQ) {
+        } else if msg.len() >= 5
+            && matches!(msg[4], TAG_PROFILE | TAG_PROFILE_AQ | TAG_PROFILE_HPEL)
+        {
             pdec.decode(&msg)?.1
         } else {
             adec.decode(&msg)?.1
         };
 
+        let n_now = n;
+        n += 1;
+        // After a seek, decode (stateful!) but don't write frames before the
+        // target — the first written file is exactly the requested frame.
+        if let Some(t) = skip_until {
+            if n_now < t {
+                continue;
+            }
+            skip_until = None;
+        }
+
         let ppm = rasterize(&frame, cols, rows, cell_bytes, scale, header.pixel);
-        fs::write(Path::new(&args.out).join(format!("frame_{n:06}.ppm")), &ppm)?;
+        fs::write(
+            Path::new(&args.out).join(format!("frame_{n_now:06}.ppm")),
+            &ppm,
+        )?;
+        written += 1;
 
         if let Some(f) = args.frame {
-            if n == f {
-                eprintln!("wrote frame {n} ({img_w}x{img_h}) to {}/", args.out);
+            if n_now == f {
+                eprintln!("wrote frame {n_now} ({img_w}x{img_h}) to {}/", args.out);
                 return Ok(());
             }
         }
-        n += 1;
     }
-    eprintln!("wrote {n} frames ({img_w}x{img_h}) to {}/", args.out);
+    eprintln!("wrote {written} frames ({img_w}x{img_h}) to {}/", args.out);
     Ok(())
 }
 

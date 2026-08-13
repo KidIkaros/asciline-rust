@@ -42,6 +42,81 @@ pub fn init_message(
     )
 }
 
+/// Seek index: an in-memory table of (frame_index, byte offset) for every
+/// forced keyframe in a `.ascf` file, so players can jump to an arbitrary
+/// frame by seeking to the nearest keyframe and decoding forward.
+///
+/// Deliberately NOT a wire change: both codecs guarantee a full, self-
+/// describing keyframe exactly when `frame_index % KEYFRAME_INTERVAL == 0`
+/// (adaptive `CodecEncoder` and the profile encoder both force `ftype 0`),
+/// and the record framing exposes the frame index in its first 4 bytes — so
+/// the scan needs no decompression and works on every existing `.ascf` file,
+/// including legacy `ASCF` containers. Scene-cut keyframes (extra, beyond the
+/// interval) are found too: the scan records any record whose index lands on
+/// the interval; a scene-cut keyframe mid-interval is skipped, but the
+/// interval keyframes alone are always sufficient to reach any frame.
+pub struct AscfSeekIndex {
+    /// (frame_index, byte offset of that record's 4-byte length prefix), ascending.
+    pub keyframes: Vec<(u32, u64)>,
+    /// Total frames seen while scanning (records past the last keyframe).
+    pub total_frames: u32,
+}
+
+impl AscfSeekIndex {
+    /// Scan a `.ascf` stream. `reader` must be positioned just after the
+    /// header (caller already consumed it); `first_offset` is the byte offset
+    /// of the first frame record. Reads every record's length + 4-byte frame
+    /// index and skips the rest — one cheap sequential pass, no decompression.
+    pub fn scan(reader: &mut impl std::io::Read, first_offset: u64) -> Result<AscfSeekIndex> {
+        use std::io::Read;
+        let mut keyframes = Vec::new();
+        let mut total_frames = 0u32;
+        let mut offset = first_offset;
+        let mut len_buf = [0u8; 4];
+        let mut idx_buf = [0u8; 4];
+        loop {
+            if reader.read_exact(&mut len_buf).is_err() {
+                break; // clean EOF
+            }
+            let len = u32::from_be_bytes(len_buf) as usize;
+            if len == 0 || len > crate::codec::MAX_DECOMPRESSED {
+                bail!("ascf seek scan: bad record length {len} at offset {offset}");
+            }
+            if len < 4 {
+                bail!("ascf seek scan: record too short for frame index at offset {offset}");
+            }
+            reader.read_exact(&mut idx_buf)?;
+            let idx = u32::from_be_bytes(idx_buf);
+            if idx % crate::codec::KEYFRAME_INTERVAL == 0 {
+                keyframes.push((idx, offset));
+            }
+            total_frames = total_frames.max(idx + 1);
+            // Skip the rest of the record without materializing it.
+            std::io::copy(
+                &mut reader.by_ref().take((len - 4) as u64),
+                &mut std::io::sink(),
+            )?;
+            offset += 4 + len as u64;
+        }
+        keyframes.sort_unstable();
+        Ok(AscfSeekIndex {
+            keyframes,
+            total_frames,
+        })
+    }
+
+    /// The largest keyframe at or before `target` — the decoder can start
+    /// there and decode forward to `target`. `None` when the stream is empty.
+    pub fn floor(&self, target: u32) -> Option<(u32, u64)> {
+        // keyframes are ascending; find the last with frame <= target
+        self.keyframes
+            .iter()
+            .rev()
+            .find(|&&(f, _)| f <= target)
+            .copied()
+    }
+}
+
 /// Hard cap on the configured grid: a playlist entry or CLI flag must not be
 /// able to ask ffmpeg for a gigantic scale (100k cols → GBs of frame traffic).
 /// Real deployments run 200-500 cols; 2000 is far beyond any sane config.
@@ -177,6 +252,50 @@ mod tests {
         assert_eq!(parsed.cols, 240);
         assert_eq!(parsed.rows, 67);
         assert_eq!(parsed.total_frames, 1234);
+    }
+
+    #[test]
+    fn ascf_seek_index_scan() {
+        use crate::codec::KEYFRAME_INTERVAL;
+        // Build a tiny synthetic .ascf: header + 100 records whose frame
+        // indices are exactly the record order (as the compilers emit), with
+        // payloads of varying length so offsets are non-trivial.
+        let mut bytes = write_ascf_header(&AscfHeader {
+            fps: 30.0,
+            mode: 6,
+            pixel: true,
+            cols: 48,
+            rows: 32,
+            total_frames: 100,
+        });
+        for i in 0..100u32 {
+            let payload_len = 5 + (i % 7) as usize; // vary the record length
+            bytes.extend_from_slice(&(payload_len as u32).to_be_bytes());
+            bytes.extend_from_slice(&i.to_be_bytes());
+            bytes.resize(bytes.len() + payload_len - 4, 0u8); // dummy tail
+        }
+        let mut cursor = std::io::Cursor::new(&bytes);
+        let mut reader = std::io::BufReader::new(&mut cursor);
+        let mut hdr = [0u8; 18];
+        use std::io::Read;
+        reader.read_exact(&mut hdr).unwrap();
+        let idx = AscfSeekIndex::scan(&mut reader, 18).unwrap();
+        assert_eq!(idx.total_frames, 100);
+        // exactly the interval frames, at offsets that account for the header
+        let expected: Vec<(u32, u64)> = (0..100u32)
+            .filter(|i| i % KEYFRAME_INTERVAL == 0)
+            .map(|i| {
+                // offset of record i: header + sum of (4 + len) over records < i
+                let before: u64 = (0..i).map(|j| 4 + (5 + (j % 7)) as u64).sum();
+                (i, 18 + before)
+            })
+            .collect();
+        assert_eq!(idx.keyframes, expected);
+        // floor(): largest keyframe <= target, so any frame is reachable
+        assert_eq!(idx.floor(0), Some((0, 18)));
+        assert_eq!(idx.floor(47), Some((0, 18)));
+        assert_eq!(idx.floor(48), Some((48, idx.keyframes[1].1)));
+        assert_eq!(idx.floor(99), Some((96, idx.keyframes.last().unwrap().1)));
     }
 
     #[test]

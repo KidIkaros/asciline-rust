@@ -19,10 +19,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use asciline::codec::{CodecDecoder, MAX_DECOMPRESSED, TAG_PROFILE, TAG_PROFILE_AQ};
+use asciline::codec::{
+    CodecDecoder, MAX_DECOMPRESSED, TAG_PROFILE, TAG_PROFILE_AQ, TAG_PROFILE_HPEL,
+};
 use asciline::mapper::Mapper;
 use asciline::profile::ProfileDecoder;
-use asciline::protocol::{parse_ascf_header, ASCF_MAGIC_V2};
+use asciline::protocol::{parse_ascf_header, AscfSeekIndex, ASCF_MAGIC_V2};
 use asciline::video::{probe_video, FrameReader, SourceParams};
 use clap::Parser;
 
@@ -74,6 +76,11 @@ struct Args {
     /// Target playback FPS (default: source FPS — no 30fps cap).
     #[arg(long)]
     fps: Option<f64>,
+
+    /// Jump to this time (seconds) before playing — uses the .ascf seek index
+    /// (nearest keyframe + forward decode), so any clip can seek instantly.
+    #[arg(long, default_value_t = 0.0)]
+    seek: f64,
 }
 
 fn main() -> Result<()> {
@@ -106,7 +113,7 @@ fn main() -> Result<()> {
     let mapper = Mapper::new(&palette, quantize_bits);
 
     if is_ascf_file(&src) {
-        play_ascf(&src, &stop)?;
+        play_ascf(&src, &stop, args.seek)?;
     } else {
         play_video(&src, &args, &mapper, quantize_bits, &stop)?;
     }
@@ -240,7 +247,8 @@ fn play_video(
 }
 
 /// Play a compiled `.ascf` clip (v2 `ASC2` headers; legacy `ASCF` tolerated).
-fn play_ascf(path: &str, stop: &Arc<AtomicBool>) -> Result<()> {
+fn play_ascf(path: &str, stop: &Arc<AtomicBool>, seek_secs: f64) -> Result<()> {
+    use std::io::{Seek, SeekFrom};
     let file = std::fs::File::open(path).with_context(|| format!("cannot open {path:?}"))?;
     let mut reader = std::io::BufReader::new(file);
 
@@ -254,6 +262,31 @@ fn play_ascf(path: &str, stop: &Arc<AtomicBool>) -> Result<()> {
     let fps = header.fps as f64;
     let (cols, rows) = (header.cols as u32, header.rows as u32);
     let cell_bytes = if header.pixel { 3 } else { 4 };
+    let header_len: u64 = if is_v2 { 18 } else { 14 };
+
+    // ── seek: jump to the nearest keyframe at/before the target frame and
+    //    decode forward from there (both decoders resync at any keyframe). ──
+    let mut seek_target: Option<u32> = None;
+    if seek_secs > 0.0 {
+        let idx = AscfSeekIndex::scan(&mut reader, header_len)
+            .with_context(|| format!("seek: cannot index {path:?}"))?;
+        let target = (seek_secs * fps).round().max(0.0) as u32;
+        match idx.floor(target) {
+            Some((kf, off)) => {
+                reader.seek(SeekFrom::Start(off))?;
+                seek_target = Some(target);
+                println!(
+                    "[Seek] {seek_secs}s → frame {target} ({} keyframes indexed, jump to keyframe {kf} @ {off}B)",
+                    idx.keyframes.len()
+                );
+            }
+            None => println!(
+                "[Seek] target {target} past end ({} frames) — playing from start",
+                idx.total_frames
+            ),
+        }
+        let _ = std::io::stdout().flush();
+    }
 
     let (t_cols, t_lines) = crossterm::terminal::size()
         .map(|(c, l)| (c as u32, l as u32))
@@ -300,13 +333,21 @@ fn play_ascf(path: &str, stop: &Arc<AtomicBool>) -> Result<()> {
                 stdout.flush()?;
             }
         } else {
-            let is_profile = msg.len() > 4 && (msg[4] == TAG_PROFILE || msg[4] == TAG_PROFILE_AQ);
+            let is_profile =
+                msg.len() > 4 && matches!(msg[4], TAG_PROFILE | TAG_PROFILE_AQ | TAG_PROFILE_HPEL);
             // Profile frames decode to BGR pixels; adaptive frames to cells.
-            let (_, frame) = if is_profile {
+            let (idx, frame) = if is_profile {
                 pdec.decode(&msg)?
             } else {
                 decoder.decode(&msg)?
             };
+            // Decode (stateful!) but don't render frames before the seek target.
+            if let Some(t) = seek_target {
+                if idx < t {
+                    continue;
+                }
+                seek_target = None;
+            }
             if header.pixel || is_profile {
                 let expect = (cols as usize) * (rows as usize) * 3;
                 if frame.len() != expect {

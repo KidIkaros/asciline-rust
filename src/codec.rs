@@ -32,6 +32,13 @@ pub const TAG_PROFILE: u8 = 4;
 /// quant-scale map. Self-describing at keyframes, so unknown decoders can
 /// still sync; see `src/profile.rs` and `web/PROFILE.md`.
 pub const TAG_PROFILE_AQ: u8 = 5;
+/// Tag 6: the lossy DCT profile with half-pixel motion compensation. Same
+/// keyframe header as tag 5 (`[QF][cols u16][rows u16][aq_levels?]`); the tag
+/// itself signals that inter-frame motion vectors are half-pel units and the
+/// decoder interpolates the reference bilinearly (luma plane only, like the
+/// integer MVs it extends). A strict superset of tag 5: even half-pel
+/// displacements are plain integer motion, so the encoder is never worse.
+pub const TAG_PROFILE_HPEL: u8 = 6;
 
 pub const KEYFRAME_INTERVAL: u32 = 48;
 pub const DEFAULT_LEVEL: u32 = 3;

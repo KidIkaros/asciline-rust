@@ -82,6 +82,15 @@ struct Args {
     /// decoder at web/codec.js >= this commit.
     #[arg(long, default_value_t = 2)]
     aq: u8,
+    /// Disable half-pixel motion compensation: emit tag 5 (AQ) / tag 4
+    /// (bit-exact with codec.py) instead of the default tag 6. Half-pel
+    /// refines the best integer motion vector to half-pel precision and the
+    /// decoder interpolates the luma reference bilinearly — a strict superset
+    /// of integer motion (never worse), but the browser decoder at
+    /// web/codec.js must be >= this commit (older decoders freeze on the
+    /// unknown tag).
+    #[arg(long)]
+    no_hpel: bool,
     /// Maximum zlib compression (level 9) — slower, smaller file.
     #[arg(long)]
     hard: bool,
@@ -167,23 +176,30 @@ fn main() -> Result<()> {
     let (cols, rows) = if profile {
         let pc = cols.div_ceil(16) * 16;
         let pr = rows.div_ceil(16) * 16;
-        let tag = if args.aq > 0 { 5 } else { 4 };
-        let aq_note = if args.aq > 0 {
-            format!(" | AQ={} levels (tag 5)", args.aq)
+        let hpel = !args.no_hpel; // tag 6 (half-pel) is the default
+        let tag = if hpel {
+            6
+        } else if args.aq > 0 {
+            5
         } else {
-            String::new()
+            4
         };
+        let mut aq_note = String::new();
+        if args.aq > 0 {
+            aq_note.push_str(&format!(" | AQ={} levels", args.aq));
+        }
+        if hpel {
+            aq_note.push_str(" | half-pel motion");
+        }
+        aq_note.push_str(&format!(" (tag {tag})"));
         if pc != cols || pr != rows {
             println!(
-                "[Compiler] Lossy DCT profile (tag {tag}) ON | QF={}{aq_note} | grid padded {}x{} → {}x{}",
+                "[Compiler] Lossy DCT profile ON | QF={}{aq_note} | grid padded {}x{} → {}x{}",
                 args.qf, cols, rows, pc, pr
             );
             (pc, pr)
         } else {
-            println!(
-                "[Compiler] Lossy DCT profile (tag {tag}) ON | QF={}{aq_note}",
-                args.qf
-            );
+            println!("[Compiler] Lossy DCT profile ON | QF={}{aq_note}", args.qf);
             (cols, rows)
         }
     } else {
@@ -238,6 +254,7 @@ fn main() -> Result<()> {
         pe.r_search = args.r_search.max(0);
         pe.rdo_lambda = args.rdo_lambda.max(0.0);
         pe.aq_levels = args.aq;
+        pe.hpel = !args.no_hpel; // tag 6 (half-pel) is the compiler default
         if args.hard {
             pe.level = 9; // --hard applies to the profile's zlib stage too
         }

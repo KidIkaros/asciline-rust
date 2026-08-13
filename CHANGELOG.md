@@ -8,6 +8,36 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
 
 ### Added
 
+- **Half-pixel motion compensation (tag 6)** for the lossy DCT profile — now
+  the **default** for `asciline-compile --profile` (`--no-hpel` restores tag
+  5, `--no-hpel --aq 0` the tag-4 bit-exact stream): the motion search
+  refines the best integer vector(s) to half-pel precision with the
+  interpolated SAD (two-stage integer→subpel refine), and both decoders
+  interpolate the luma reference bilinearly with identical integer math
+  (`(A+B+1)>>1` / `(A+B+C+D+2)>>2`, edge-clamped). Tag-6 keyframes always
+  carry the `aq_levels` byte (0 = AQ off), so AQ composes with half-pel. New
+  differential check `node experiments/check_profile_hpel_vectors.js` (wired
+  into CI) proves `web/codec.js` reproduces the Rust encoder's tag-6
+  reconstruction byte-for-byte (95 frames). Measured at QF=70/cols=240: Big
+  Buck Bunny 466 KB @ 38.82 dB → **451 KB @ 39.54 dB** (−3.1% size AND
+  +0.72 dB, +0.006 SSIM); drone 403 KB @ 39.72 → 417 KB @ 40.29 (+0.57 dB at
+  +3.5% size). A strict superset of integer motion (even half-pel
+  displacements are plain integer vectors), so it is never worse. The
+  published sample evidence was regenerated with the new default (BBB matrix
+  39.54 dB, drone 40.29 dB); the fuzz corpus generator pins
+  `--no-hpel --aq 0` (drift 0).
+- **Seek index for `.ascf` files** (no wire change): `asciline-player
+  --seek SECS` and `asciline-render --seek SECS` (and `--frame N` now jumps
+  straight to the frame's keyframe) build a scan-on-open keyframe index —
+  every frame whose index lands on the 48-frame keyframe interval, from the
+  4-byte frame index in each record's prefix, so it needs no decompression
+  and works on every existing `.ascf` (legacy `ASCF` or v2 `ASC2`, both
+  codecs). Seeking jumps to the nearest keyframe and decodes forward —
+  verified byte-identical to sequential playback (`tests/ascf_seek.rs`).
+- **Browser-decoder playback check**: `node experiments/play_ascf.js` decodes
+  the committed sample `.ascf` files end-to-end with the shipped `web/codec.js`
+  `makeDecoder` (the exact path the web player uses) — tag dispatch, keyframe
+  resync, frame sizes, index monotonicity; wired into CI.
 - **Adaptive quantization (tag 5)** for the lossy DCT profile — now the
   **default** for `asciline-compile --profile` (`--aq 2`; `--aq 0` restores
   the tag-4 bit-exact stream, `--aq 4` selects the 4-level map): x264-style

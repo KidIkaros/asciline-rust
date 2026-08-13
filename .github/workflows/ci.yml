@@ -65,8 +65,20 @@ jobs:
           cargo test --test roundtrip_profile -- --ignored
           node experiments/check_profile_vectors.js
           node experiments/check_profile_aq_vectors.js
+          node experiments/check_profile_hpel_vectors.js
           cargo test --test decode_python_vectors -- --ignored
           node experiments/check_rust_vectors.js
+
+      - name: Browser-decoder playback of committed .ascf samples (codec.js end-to-end)
+        # The exact .ascf bytes shipped in samples/ must decode cleanly in the
+        # browser decoder (tag dispatch, keyframe resync, frame sizes, index
+        # monotonicity) — this is the playback path web/app.js actually uses.
+        run: |
+          node experiments/play_ascf.js \
+            samples/big_buck_bunny_profile.ascf \
+            samples/big_buck_bunny_pixel.ascf \
+            samples/big_buck_bunny_ascii.ascf \
+            samples/drone_profile.ascf
 
       - name: e2e server test (real binary over WebSocket)
         run: cargo test --test e2e_server

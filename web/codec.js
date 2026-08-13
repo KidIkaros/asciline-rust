@@ -21,7 +21,7 @@
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AscilineCodec = api;
 })(typeof self !== 'undefined' ? self : this, function () {
-  const TAG_RAW = 0, TAG_ZLIB = 1, TAG_DELTA = 2, TAG_RLE_FULL = 3, TAG_PROFILE = 4, TAG_PROFILE_AQ = 5;
+  const TAG_RAW = 0, TAG_ZLIB = 1, TAG_DELTA = 2, TAG_RLE_FULL = 3, TAG_PROFILE = 4, TAG_PROFILE_AQ = 5, TAG_PROFILE_HPEL = 6;
 
   async function inflate(bytes) {
     // Direct DecompressionStream pump — avoids the Blob+Response wrapper
@@ -87,7 +87,26 @@
     for(let y=0;y<8;y++)for(let x=0;x<8;x++){let s=0;for(let u=0;u<8;u++)s+=_P_MI[u*8+y]*_pT[u*8+x];_pO[y*8+x]=Math.floor((s+2048)/4096);}
     return _pO;
   }
-  function _pDecodePlane(data,off,P,NP,ft,useMv,qm,aqLevels){
+  // Half-pel bilinear sample (tag 6): displacement (hdx,hdy) in half-pel
+  // units; integer part hdx>>1 (floor for negatives), fractional bit hdx&1.
+  // The four integer neighbors are edge-clamped; identical integer math to
+  // the Rust encoder/decoder (hpel_sample in src/profile.rs).
+  function _pHpelSample(buf,W,H,px,py,hdx,hdy){
+    let ix=px+(hdx>>1), iy=py+(hdy>>1);
+    if(ix<0)ix=0; else if(ix>=W)ix=W-1;
+    if(iy<0)iy=0; else if(iy>=H)iy=H-1;
+    const fx=hdx&1, fy=hdy&1;
+    if(fx===0&&fy===0)return buf[iy*W+ix];
+    let ix1=ix+1; if(ix1>=W)ix1=W-1;
+    let iy1=iy+1; if(iy1>=H)iy1=H-1;
+    const a=buf[iy*W+ix], b=buf[iy*W+ix1], c=buf[iy1*W+ix], d=buf[iy1*W+ix1];
+    let v;
+    if(fx===1&&fy===0)v=(a+b+1)>>1;
+    else if(fx===0&&fy===1)v=(a+c+1)>>1;
+    else v=(a+b+c+d+2)>>2;
+    return v<0?0:(v>255?255:v);
+  }
+  function _pDecodePlane(data,off,P,NP,ft,useMv,hpel,qm,aqLevels){
     const W=P.w,H=P.h,nbx=W>>3,nby=H>>3,nb=nbx*nby;
     // Tag-5 AQ map (luma only): log2(aqLevels) bits per block, MSB-first,
     // preceding the skip mask. Same packing math as the Rust encoder/decoder.
@@ -127,6 +146,7 @@
         for(let x=0;x<8;x++){
           let pred;
           if(ft===0)pred=128;
+          else if(useMv&&hpel)pred=_pHpelSample(P.buf,W,H,bx*8+x,by*8+y,dx,dy);
           else{let sx=bx*8+x+dx,sy=by*8+y+dy;sx=sx<0?0:(sx>=W?W-1:sx);sy=sy<0?0:(sy>=H?H-1:sy);pred=P.buf[sy*W+sx];}
           const val=pred+(res===null?flat:res[y*8+x]);
           NP.buf[row+bx*8+x]=val<0?0:(val>255?255:val);
@@ -142,27 +162,30 @@
       out[o]=B<0?0:(B>255?255:B);out[o+1]=G<0?0:(G>255?255:G);out[o+2]=R<0?0:(R>255?255:R);}}
     return out;}
   function makeProfileDecoder(){
-    let W=0,H=0,cW=0,cH=0,planes=null,spare=null,QL=null,QC=null,aqL=0;
+    let W=0,H=0,cW=0,cH=0,planes=null,spare=null,QL=null,QC=null,aqL=0,hpel=false;
     const alloc=()=>[{w:W,h:H,buf:new Uint8Array(W*H)},{w:cW,h:cH,buf:new Uint8Array(cW*cH)},{w:cW,h:cH,buf:new Uint8Array(cW*cH)}];
     async function decode(message){
       const b=message instanceof Uint8Array?message:new Uint8Array(message);
       const dv=new DataView(b.buffer,b.byteOffset,b.byteLength);
       const idx=dv.getUint32(0,false); const tag=b[4]; const payload=await inflate(b.subarray(5)); const ft=payload[0];
       let off=1;
-      if(ft===0){ // keyframe self-describes: [QF][cols u16][rows u16][aq_levels (tag 5)]
+      if(ft===0){ // keyframe self-describes: [QF][cols u16][rows u16][aq_levels (tags 5/6)]
         const QF=payload[1]; const cols=(payload[2]<<8)|payload[3]; const rows=(payload[4]<<8)|payload[5];
-        if(tag===TAG_PROFILE_AQ){ aqL=payload[6]; off=7; } else { aqL=0; off=6; }
+        if(tag===TAG_PROFILE_AQ){ aqL=payload[6]; off=7; }
+        else if(tag===TAG_PROFILE_HPEL){ aqL=payload[6]; off=7; } // always carries the byte (0 = AQ off)
+        else { aqL=0; off=6; }
+        hpel = (tag===TAG_PROFILE_HPEL); // tag 6: half-pel motion (luma only)
         const q=_pqtables(QF); QL=q[0]; QC=q[1];
         if(planes===null||W!==cols||H!==rows){W=cols;H=rows;cW=W>>1;cH=H>>1;planes=alloc();spare=alloc();}
       }
       // ping-pong the plane buffers instead of allocating a new set every frame
       const out=spare;
       for(let i=0;i<3;i++) out[i].buf.set(planes[i].buf);
-      for(let pi=0;pi<3;pi++) off=_pDecodePlane(payload,off,planes[pi],out[pi],ft,pi===0,pi===0?QL:QC,pi===0?aqL:0);
+      for(let pi=0;pi<3;pi++) off=_pDecodePlane(payload,off,planes[pi],out[pi],ft,pi===0,pi===0&&hpel,pi===0?QL:QC,pi===0?aqL:0);
       spare=planes; planes=out;
       return {frameIndex:idx, frame:_pYuvToBgr(planes[0].buf,planes[1].buf,planes[2].buf,W,H)};
     }
-    return {decode, reset(){planes=null;spare=null;QL=QC=null;aqL=0;}};
+    return {decode, reset(){planes=null;spare=null;QL=QC=null;aqL=0;hpel=false;}};
   }
 
   /**
@@ -179,7 +202,7 @@
       const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
       const frameIndex = view.getUint32(0, false); // big-endian
       const tag = bytes[4];
-      if (tag === TAG_PROFILE || tag === TAG_PROFILE_AQ) {
+      if (tag === TAG_PROFILE || tag === TAG_PROFILE_AQ || tag === TAG_PROFILE_HPEL) {
         if (!profileDec) profileDec = makeProfileDecoder();
         return await profileDec.decode(bytes);
       }
@@ -245,5 +268,5 @@
     return { decode, reset() { prev = null; profileDec = null; } };
   }
 
-  return { makeDecoder, makeProfileDecoder, inflate, TAG_RAW, TAG_ZLIB, TAG_DELTA, TAG_RLE_FULL, TAG_PROFILE, TAG_PROFILE_AQ };
+  return { makeDecoder, makeProfileDecoder, inflate, TAG_RAW, TAG_ZLIB, TAG_DELTA, TAG_RLE_FULL, TAG_PROFILE, TAG_PROFILE_AQ, TAG_PROFILE_HPEL };
 });

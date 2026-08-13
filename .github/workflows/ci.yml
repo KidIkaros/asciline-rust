@@ -130,6 +130,37 @@ jobs:
           fi
           echo "no crashes"
 
+  corpus-check:
+    name: Fuzz corpus reproducible
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install ffmpeg (deterministic source generation)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Regenerate the corpus and fail on drift
+        # The committed fuzz/corpus is generated deterministically
+        # (lossless FFV1 source -> thread-count-independent compiler); this
+        # job regenerates it and fails if the working tree differs, keeping
+        # CI fuzzing on the exact committed seeds.
+        run: |
+          experiments/make_fuzz_corpus.sh
+          if [ -n "$(git status --porcelain fuzz/corpus)" ]; then
+            echo "::error::fuzz/corpus drifted from the committed seeds — run experiments/make_fuzz_corpus.sh and commit the result"
+            git status --porcelain fuzz/corpus | head -10
+            exit 1
+          fi
+          echo "corpus is byte-reproducible"
+
   security-audit:
     name: Security audit (cargo-audit)
     runs-on: ubuntu-latest

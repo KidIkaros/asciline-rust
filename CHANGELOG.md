@@ -19,7 +19,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
   seed corpus (`fuzz/corpus`, regenerable via `experiments/make_fuzz_corpus.sh`)
   carrying real tag-4 / adaptive wire records so the deep decoder paths are
   reachable. A nightly `cargo-fuzz` smoke job (build + 45 s per target) runs
-  in CI.
+  in CI, and a `corpus-check` job regenerates `fuzz/corpus` and fails on any
+  drift — the generator is deterministic (the source clip is encoded
+  losslessly with FFV1 so the seeds don't depend on the ffmpeg build's x264
+  rate control), keeping CI fuzzing on the exact committed seeds.
 - `DEPLOYMENT.md` and `deploy/` — production deployment kit: a systemd unit
   (`asciline.service`), Docker Compose (`.env.example`, healthcheck, looped
   folder mode), and a Caddy TLS reverse-proxy config. The `deploy/` tree and

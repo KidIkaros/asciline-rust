@@ -6,6 +6,14 @@
 # bytes. These seeds give it real wire records to perturb, so the CI smoke
 # runs and local `cargo fuzz run` exercise `dec_plane` / RLE / delta paths.
 #
+# DETERMINISM: the corpus is committed and CI (job `corpus-check`) regenerates
+# it and fails on any drift. The source clip is therefore encoded losslessly
+# with FFV1 in a Matroska container — an x264 intermediate would depend on the
+# ffmpeg version's rate control and make the corpus drift between builds. With
+# FFV1 the decoded frames are bit-exact copies of the (deterministic) lavfi
+# sources, and the compiler's output is thread-count independent, so the same
+# bytes come out everywhere.
+#
 # Run from the repo root:  experiments/make_fuzz_corpus.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -20,18 +28,19 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 # 3 s clip with a hard cut mid-stream: keyframes, motion deltas, skips.
+# FFV1 (lossless, deterministic) in mkv — see the determinism note above.
 ffmpeg -y -v error \
     -f lavfi -i 'testsrc2=size=320x180:rate=30:duration=2' \
     -f lavfi -i 'smptebars=size=320x180:rate=30:duration=1' \
     -filter_complex '[0:v][1:v]concat=n=2:v=1[v]' -map '[v]' -pix_fmt yuv420p \
-    "$TMP/clip.mp4"
+    -c:v ffv1 -f matroska "$TMP/clip.mkv"
 
 # tag-4 lossy DCT profile (cell-independent) — the deep DCT decoder paths
-"$BIN" "$TMP/clip.mp4" --cols 240 --profile --qf 70 --no-quality --out "$TMP/prof" >/dev/null
+"$BIN" "$TMP/clip.mkv" --cols 240 --profile --qf 70 --no-quality --out "$TMP/prof" >/dev/null
 # adaptive, cell=4 (text mode, 16 M colours)
-"$BIN" "$TMP/clip.mp4" --cols 40 --mode 6 --tolerance 8 --no-quality --out "$TMP/adapt4" >/dev/null
+"$BIN" "$TMP/clip.mkv" --cols 40 --mode 6 --tolerance 8 --no-quality --out "$TMP/adapt4" >/dev/null
 # adaptive, cell=3 (pixel mode)
-"$BIN" "$TMP/clip.mp4" --cols 40 --pixel --tolerance 8 --no-quality --out "$TMP/adapt3" >/dev/null
+"$BIN" "$TMP/clip.mkv" --cols 40 --pixel --tolerance 8 --no-quality --out "$TMP/adapt3" >/dev/null
 
 python3 - "$TMP/prof.ascf" "$TMP/adapt4.ascf" "$TMP/adapt3.ascf" <<'EOF'
 import os, shutil, sys

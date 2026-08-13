@@ -302,8 +302,26 @@ The QF=40/70/90 size-quality trade-off is:
 
 The generated matrix is also available at
 [`samples/big_buck_bunny_quality_matrix.md`](samples/big_buck_bunny_quality_matrix.md).
-The stills above are decoded frames — exactly what `asciline-player` and the
-browser decoder render, not screenshots of an internal encoder buffer.
+
+### Speed versus playback rate
+
+The comparison video is synchronized: every panel has its own **30 fps display
+label** because all three outputs preserve the source clip's playback rate.
+Offline compile speed is a separate measurement:
+
+| Format | Display FPS | Compile FPS | Output |
+|---|---:|---:|---:|
+| ASCII mode | 30 | 216.2 | 2,620,569 B |
+| PIXEL lossless | 30 | 111.1 | 9,779,783 B |
+| PROFILE QF=70 | 30 | 190.5 | 346,405 B |
+| PROFILE QF=70, no quality report | 30 | 292.7 | 346,405 B |
+
+These are representative measurements on the pinned 240-frame excerpt; compile
+FPS means frames processed per wall-second, not playback FPS. The full report
+and rerun script are [`samples/big_buck_bunny_speed_analysis.md`](samples/big_buck_bunny_speed_analysis.md)
+and `experiments/measure_sample_speed.sh`. GIFs are intentionally downsampled
+previews and must not be used to compare playback speed; use the synchronized
+MP4s and this table.
 
 ### Real video artifacts
 

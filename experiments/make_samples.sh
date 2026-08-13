@@ -23,6 +23,8 @@ SHA30=8f113ef593688f47ec8d8b0d093fb955cb04bc350826c775d2e9ca451870856e
 SHA60=1cf8e47cdef1c3acb4cab994a463a0ca6dabe1532bc89f09f90873dae45e98e8
 [[ "$(sha256sum "$SOURCE30" | awk '{print $1}')" == "$SHA30" ]]
 [[ "$(sha256sum "$SOURCE60" | awk '{print $1}')" == "$SHA60" ]]
+SOURCE_FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate \
+    -of csv=p=0 "$SOURCE30" | awk -F/ '{printf "%.0f", $1 / $2}')
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -90,14 +92,14 @@ print(f"{int(sys.argv[1]) / int(sys.argv[2]):.1f}")
 PY
 )
 FILTER="\
-[0:v]pad=480:288:0:9:black,drawtext=$LBL:text='SOURCE  Big Buck Bunny':x=10:y=10[a];\
-[1:v]pad=480:288:0:9:black,drawtext=$LBL:text='PIXEL  lossless adaptive':x=10:y=10[b];\
-[2:v]drawtext=$LBL:text='PROFILE  QF=70  PSNR-Y ${PSNR_Y} dB  ${RATIO}x smaller':x=10:y=10[c];\
-[a][b][c]hstack=3,drawtext=$LBL:text='Big Buck Bunny  |  frame %{n}  |  30 fps':x=12:y=h-38[v]"
+[0:v]pad=480:288:0:9:black,drawtext=$LBL:text='SOURCE  Big Buck Bunny  |  clip ${SOURCE_FPS} fps':x=10:y=10[a];\
+[1:v]pad=480:288:0:9:black,drawtext=$LBL:text='PIXEL  lossless adaptive  |  clip ${SOURCE_FPS} fps':x=10:y=10[b];\
+[2:v]drawtext=$LBL:text='PROFILE  QF=70  |  clip ${SOURCE_FPS} fps  |  PSNR-Y ${PSNR_Y} dB  |  ${RATIO}x smaller':x=10:y=10[c];\
+[a][b][c]hstack=3,drawtext=$LBL:text='Big Buck Bunny  |  synchronized clip ${SOURCE_FPS} fps  |  GIF preview 10 fps':x=12:y=h-38[v]"
 ffmpeg -y -v error \
-    -framerate 30 -i "$TMP/source_%06d.ppm" \
-    -framerate 30 -i "$TMP/r_pixel_all/frame_%06d.ppm" \
-    -framerate 30 -i "$TMP/r_profile_all/frame_%06d.ppm" \
+    -framerate "$SOURCE_FPS" -i "$TMP/source_%06d.ppm" \
+    -framerate "$SOURCE_FPS" -i "$TMP/r_pixel_all/frame_%06d.ppm" \
+    -framerate "$SOURCE_FPS" -i "$TMP/r_profile_all/frame_%06d.ppm" \
     -filter_complex "$FILTER" -map '[v]' -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
     samples/evidence/cartoon_compare.mp4
 
@@ -106,12 +108,12 @@ ffmpeg -y -v error \
 # at a readable 720×405-ish size for judging faces, fur, foliage, and edges.
 ffmpeg -y -v error -i "$SOURCE30" -vf scale=720:405 -start_number 0 "$TMP/source_large_%06d.ppm"
 ffmpeg -y -v error \
-    -framerate 30 -i "$TMP/source_large_%06d.ppm" \
-    -framerate 30 -i "$TMP/r_profile_large/frame_%06d.ppm" \
+    -framerate "$SOURCE_FPS" -i "$TMP/source_large_%06d.ppm" \
+    -framerate "$SOURCE_FPS" -i "$TMP/r_profile_large/frame_%06d.ppm" \
     -filter_complex "\
-      [0:v]pad=720:432:0:13:color=black,drawtext=$LBL:text='SOURCE  Big Buck Bunny':x=12:y=12[a];\
-      [1:v]drawtext=$LBL:text='PROFILE  QF=70  PSNR-Y ${PSNR_Y} dB':x=12:y=12[b];\
-      [a][b]hstack,drawtext=$LBL:text='source vs displayed profile  |  frame %{n}  |  30 fps':x=12:y=h-38[v]" \
+      [0:v]pad=720:432:0:13:color=black,drawtext=$LBL:text='SOURCE  Big Buck Bunny  |  clip ${SOURCE_FPS} fps':x=12:y=12[a];\
+      [1:v]drawtext=$LBL:text='PROFILE  QF=70  |  clip ${SOURCE_FPS} fps  |  PSNR-Y ${PSNR_Y} dB':x=12:y=12[b];\
+      [a][b]hstack,drawtext=$LBL:text='source vs displayed profile  |  synchronized clip ${SOURCE_FPS} fps  |  GIF preview 5 fps':x=12:y=h-38[v]" \
     -map '[v]' -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
     samples/evidence/cartoon_source_profile_large.mp4
 ffmpeg -y -v error -i samples/evidence/cartoon_source_profile_large.mp4 \
@@ -123,12 +125,12 @@ ffmpeg -y -v error -i samples/evidence/cartoon_source_profile_large.mp4 -i "$TMP
 # Center-detail crop: a second view for spotting ringing, chroma edges, and
 # texture changes without shrinking the whole frame into three columns.
 ffmpeg -y -v error \
-    -framerate 30 -i "$TMP/source_large_%06d.ppm" \
-    -framerate 30 -i "$TMP/r_profile_large/frame_%06d.ppm" \
+    -framerate "$SOURCE_FPS" -i "$TMP/source_large_%06d.ppm" \
+    -framerate "$SOURCE_FPS" -i "$TMP/r_profile_large/frame_%06d.ppm" \
     -filter_complex "\
-      [0:v]crop=360:202:180:13,scale=640:360:flags=lanczos,drawtext=$LBL:text='SOURCE  center detail':x=12:y=12[a];\
-      [1:v]crop=360:202:180:0,scale=640:360:flags=lanczos,drawtext=$LBL:text='PROFILE  QF=70  center detail':x=12:y=12[b];\
-      [a][b]hstack,drawtext=$LBL:text='detail inspection  |  differences are not amplified':x=12:y=h-38[v]" \
+      [0:v]crop=360:202:180:13,scale=640:360:flags=lanczos,drawtext=$LBL:text='SOURCE  center detail  |  clip ${SOURCE_FPS} fps':x=12:y=12[a];\
+      [1:v]crop=360:202:180:0,scale=640:360:flags=lanczos,drawtext=$LBL:text='PROFILE  QF=70  center detail  |  clip ${SOURCE_FPS} fps':x=12:y=12[b];\
+      [a][b]hstack,drawtext=$LBL:text='detail inspection  |  synchronized clip ${SOURCE_FPS} fps  |  GIF preview 5 fps':x=12:y=h-38[v]" \
     -map '[v]' -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
     samples/evidence/cartoon_detail_compare.mp4
 ffmpeg -y -v error -i samples/evidence/cartoon_detail_compare.mp4 \
@@ -148,8 +150,8 @@ ffmpeg -y -v error -i samples/evidence/cartoon_compare.mp4 -i "$TMP/compare_pale
 
 # Profile-only view: no panel shrinking, so viewers can judge the actual
 # reconstruction at a readable size.
-ffmpeg -y -v error -framerate 30 -i "$TMP/r_profile_all/frame_%06d.ppm" \
-    -vf "drawtext=$LBL:text='PROFILE  QF=70  Big Buck Bunny  |  ${RATIO}x smaller  |  PSNR-Y ${PSNR_Y} dB':x=10:y=10" \
+ffmpeg -y -v error -framerate "$SOURCE_FPS" -i "$TMP/r_profile_all/frame_%06d.ppm" \
+    -vf "drawtext=$LBL:text='PROFILE  QF=70  |  clip ${SOURCE_FPS} fps  |  ${RATIO}x smaller  |  PSNR-Y ${PSNR_Y} dB':x=10:y=10" \
     -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p samples/evidence/cartoon_profile.mp4
 ffmpeg -y -v error -i samples/evidence/cartoon_profile.mp4 \
     -vf 'fps=10,scale=560:-1:flags=lanczos,palettegen=stats_mode=diff' "$TMP/profile_palette.png"
@@ -159,15 +161,15 @@ ffmpeg -y -v error -i samples/evidence/cartoon_profile.mp4 -i "$TMP/profile_pale
 
 # Difference view: amplified only to make subtle DCT/chroma errors visible.
 ffmpeg -y -v error \
-    -framerate 30 -i "$TMP/source_%06d.ppm" \
-    -framerate 30 -i "$TMP/r_profile_all/frame_%06d.ppm" \
+    -framerate "$SOURCE_FPS" -i "$TMP/source_%06d.ppm" \
+    -framerate "$SOURCE_FPS" -i "$TMP/r_profile_all/frame_%06d.ppm" \
     -filter_complex "\
       [0:v]pad=480:288:0:9:black,split=2[a_blend][a_label];\
       [1:v]crop=480:288:0:0,split=2[b_blend][b_label];\
-      [a_blend][b_blend]blend=all_mode=difference,eq=contrast=4:brightness=0.08,drawtext=$LBL:text='AMPLIFIED DIFFERENCE  4x  (not normal output)':x=10:y=10[d];\
-      [a_label]drawtext=$LBL:text='SOURCE':x=10:y=10[s];\
-      [b_label]drawtext=$LBL:text='PROFILE QF=70':x=10:y=10[p];\
-      [s][p][d]hstack=3,drawtext=$LBL:text='Big Buck Bunny  |  differences amplified for inspection':x=12:y=h-38[v]" \
+      [a_blend][b_blend]blend=all_mode=difference,eq=contrast=4:brightness=0.08,drawtext=$LBL:text='AMPLIFIED DIFFERENCE  4x  (not normal output)  |  clip ${SOURCE_FPS} fps':x=10:y=10[d];\
+      [a_label]drawtext=$LBL:text='SOURCE  |  clip ${SOURCE_FPS} fps':x=10:y=10[s];\
+      [b_label]drawtext=$LBL:text='PROFILE QF=70  |  clip ${SOURCE_FPS} fps':x=10:y=10[p];\
+      [s][p][d]hstack=3,drawtext=$LBL:text='Big Buck Bunny  |  synchronized clip ${SOURCE_FPS} fps  |  GIF preview 10 fps':x=12:y=h-38[v]" \
     -map '[v]' -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p samples/evidence/cartoon_difference.mp4
 ffmpeg -y -v error -i samples/evidence/cartoon_difference.mp4 \
     -vf 'fps=10,scale=800:-1:flags=lanczos,palettegen=stats_mode=diff' "$TMP/diff_palette.png"

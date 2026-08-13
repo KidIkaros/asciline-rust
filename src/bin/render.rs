@@ -18,6 +18,7 @@
 use std::fs;
 use std::io::{BufReader, Read};
 use std::path::Path;
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use asciline::codec::{CodecDecoder, MAX_DECOMPRESSED, TAG_PROFILE};
@@ -25,6 +26,8 @@ use asciline::profile::ProfileDecoder;
 use asciline::protocol::{parse_ascf_header, ASCF_MAGIC_V2};
 use clap::Parser;
 use font8x8::UnicodeFonts;
+use futures_util::StreamExt;
+use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -33,8 +36,8 @@ use font8x8::UnicodeFonts;
     about = "Headless .ascf -> PPM frame renderer (pixel blocks / ASCII glyphs)"
 )]
 struct Args {
-    /// Compiled .ascf clip to render.
-    ascf: String,
+    /// Compiled .ascf clip to render (or use `--live` for a WebSocket stream).
+    ascf: Option<String>,
     /// Output directory for frame_%06d.ppm files (created if missing).
     #[arg(long, default_value = "render_out")]
     out: String,
@@ -44,11 +47,27 @@ struct Args {
     /// Render only this one frame (0-based), then stop.
     #[arg(long)]
     frame: Option<u32>,
+    /// Render a LIVE WebSocket stream instead of a file: connect, parse the
+    /// INIT handshake, decode the binary frames as they arrive and write a
+    /// PPM per frame (plus a measured-fps line on stderr). Use with a timeout
+    /// or `--max-frames` for a bounded capture, e.g.
+    /// `asciline-render --live ws://127.0.0.1:8000/ws?codec=adaptive`.
+    #[arg(long)]
+    live: Option<String>,
+    /// Stop after this many frames (live mode).
+    #[arg(long)]
+    max_frames: Option<u32>,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let file = fs::File::open(&args.ascf).with_context(|| format!("open {}", args.ascf))?;
+    if let Some(url) = &args.live {
+        return live_render(url, &args);
+    }
+    let Some(ascf) = &args.ascf else {
+        bail!("provide an .ascf file to render or --live <ws://url> for a stream");
+    };
+    let file = fs::File::open(ascf).with_context(|| format!("open {ascf}"))?;
     let mut reader = BufReader::new(file);
 
     let mut header_bytes = [0u8; 18];
@@ -117,6 +136,111 @@ fn cell_px(scale: usize, pixel: bool) -> usize {
     } else {
         8 * scale // font8x8 glyphs are 8×8 bitmaps
     }
+}
+
+/// Grid + rasterization parameters parsed from the live INIT handshake.
+struct LiveHeader {
+    mode: u8,
+    cols: usize,
+    rows: usize,
+    pixel: bool,
+    cell_bytes: usize,
+    scale: usize,
+    img_w: usize,
+    img_h: usize,
+}
+
+/// Live WS capture: decode the wire frames as they arrive (the same messages
+/// the browser client receives) and rasterize them to PPMs. Prints the INIT
+/// header and the measured receive rate on stderr, e.g.
+/// `asciline-render --live ws://127.0.0.1:8000/ws?codec=adaptive --max-frames 720`.
+fn live_render(url: &str, args: &Args) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build tokio runtime")?;
+    rt.block_on(async move {
+        let (mut ws, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .with_context(|| format!("connect {url}"))?;
+
+        let mut hdr: Option<LiveHeader> = None;
+        let mut adec: Option<CodecDecoder> = None;
+        let mut pdec = ProfileDecoder::new();
+        let mut n = 0u32;
+        let t0 = Instant::now();
+
+        while let Some(msg) = ws.next().await {
+            let msg = msg.context("ws read")?;
+            match msg {
+                Message::Text(t) if hdr.is_none() && t.starts_with("INIT:") => {
+                    let p: Vec<&str> = t.split(':').collect();
+                    let fps = p[1].parse::<f64>().unwrap_or(0.0);
+                    let mode = p[2].parse::<u8>().unwrap_or(1);
+                    let cols = p[3].parse::<usize>().unwrap_or(0);
+                    let rows = p[4].parse::<usize>().unwrap_or(0);
+                    let pixel = p.get(5).map(|s| *s == "1").unwrap_or(false);
+                    let cell_bytes = if pixel { 3 } else { 4 };
+                    let scale = args.scale.unwrap_or(if pixel { 8 } else { 2 }) as usize;
+                    let h = LiveHeader {
+                        mode,
+                        cols,
+                        rows,
+                        pixel,
+                        cell_bytes,
+                        scale,
+                        img_w: cols * cell_px(scale, pixel),
+                        img_h: rows * cell_px(scale, pixel),
+                    };
+                    fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out))?;
+                    adec = Some(CodecDecoder::new(cell_bytes));
+                    eprintln!(
+                        "live INIT: fps={fps} mode={mode} grid={cols}x{rows} pixel={pixel} -> {}x{}",
+                        h.img_w, h.img_h
+                    );
+                    hdr = Some(h);
+                }
+                Message::Binary(b) => {
+                    let Some(h) = &hdr else { continue };
+                    if h.mode == 1 {
+                        continue; // plain-text record, not a video frame
+                    }
+                    let frame: Vec<u8> = if h.pixel {
+                        // pixel mode bypasses the codec: raw frames are
+                        // [u32 BE index][BGR payload] with no tag byte
+                        if b.len() != 4 + h.cols * h.rows * h.cell_bytes {
+                            bail!("live frame: {} bytes != 4 + {}x{}x{}", b.len(), h.cols, h.rows, h.cell_bytes);
+                        }
+                        b[4..].to_vec()
+                    } else if b.len() >= 5 && b[4] == TAG_PROFILE {
+                        pdec.decode(&b)?.1
+                    } else {
+                        adec.as_mut().unwrap().decode(&b)?.1
+                    };
+                    let ppm = rasterize(&frame, h.cols, h.rows, h.cell_bytes, h.scale, h.pixel);
+                    fs::write(Path::new(&args.out).join(format!("frame_{n:06}.ppm")), &ppm)?;
+                    n += 1;
+                    if let Some(max) = args.max_frames {
+                        if n >= max {
+                            break;
+                        }
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+        let dt = t0.elapsed().as_secs_f64();
+        let (img_w, img_h) = hdr
+            .as_ref()
+            .map(|h| (h.img_w, h.img_h))
+            .unwrap_or((0, 0));
+        eprintln!(
+            "live capture: {n} frames in {dt:.2}s -> {:.1} fps ({img_w}x{img_h} per frame)",
+            n as f64 / dt.max(1e-9)
+        );
+        Ok(())
+    })
 }
 
 /// Rasterize one decoded frame (BGR, `cell_bytes` per cell) into a P6 PPM.

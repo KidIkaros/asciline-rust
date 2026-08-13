@@ -1,0 +1,7 @@
+== fps_count.js — browser-like WS frame counter (3 s window) ==
+INIT: fps=120.0 mode=6 grid=240x135
+frames in 3.0s: 333 → 111.0 fps
+
+== asciline-render --live — full 720-frame capture of the wire stream ==
+live INIT: fps=120 mode=6 grid=240x135 pixel=true -> 480x270
+live capture: 720 frames in 6.20s -> 116.1 fps (480x270 per frame)

@@ -279,6 +279,31 @@ for the full report, including the worst frame). The stills above are frame 60
 of each file — pixel and profile images are *decoded* frames, so what you see
 is exactly what `asciline-player` and the browser decoders render.
 
+### Real video (not the GIF)
+
+Two playable mp4s prove the claims that stills cannot:
+
+| Video | What it shows |
+| :--- | :--- |
+| [`samples/evidence/quality_compare.mp4`](samples/evidence/quality_compare.mp4) | SOURCE \| PIXEL \| PROFILE side-by-side at **240 columns** (3× the still resolution), 30 fps, labels + measured PSNR burned into each frame |
+| [`samples/evidence/stream_120fps.mp4`](samples/evidence/stream_120fps.mp4) | the **actual WebSocket wire frames** captured live from `asciline-server` streaming a 120 fps source — 720 real frames at 120 fps, rendered by `asciline-render --live` |
+
+The 120 fps clip is the honest proof of the frame-rate claim: a browser capture
+cannot show more than the display refresh rate, so `--live` records what the
+server actually sends over the wire. The measured rates for that capture
+(240-column pixel mode, i.e. the highest-detail live config) are in
+[`samples/evidence/stream_120fps.log`](samples/evidence/stream_120fps.log):
+
+```
+INIT: fps=120.0 mode=6 grid=240x135
+frames in 3.0s: 333 → 111.0 fps      # fps_count.js, browser-like WS counter
+live capture: 720 frames in 6.20s → 116.1 fps   # asciline-render --live
+```
+
+Both >60 fps. (A lossless FFV1 source caps the server near 47 fps — that is the
+source codec's decode cost, not the pipeline; the h264 source used here is why
+the wire stream holds 111–116 fps.)
+
 The samples are committed; regenerate them anytime with
 `experiments/make_samples.sh`.
 

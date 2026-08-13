@@ -8,6 +8,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
 
 ### Added
 
+- `asciline-render --live`: a WebSocket capture mode that records the real
+  wire frames `asciline-server` sends (INIT + every frame) and rasterizes
+  them, turning a live stream into video — the basis for the 120 fps proof.
+- Real-video format evidence in `samples/evidence/`: `quality_compare.mp4`
+  (SOURCE | PIXEL | PROFILE side-by-side at 240 columns, 30 fps, PSNR burned
+  into each frame) and `stream_120fps.mp4` (720 frames captured live from a
+  120 fps source at a measured 111–116 fps — >60 fps, the claim a browser
+  capture cannot show), with the measurement logs in
+  `samples/evidence/stream_120fps.log`.
 - `tests/load_server.rs` — a real-binary concurrent load test proving
   `--max-clients` under contention (both in-cap clients stream, `/healthz`
   reports the exact in-use count, the overflow connection is rejected, and a

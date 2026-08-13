@@ -23,6 +23,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versioning follows
   drift — the generator is deterministic (the source clip is encoded
   losslessly with FFV1 so the seeds don't depend on the ffmpeg build's x264
   rate control), keeping CI fuzzing on the exact committed seeds.
+- A `vectors-check` job does the same for the committed Python differential
+  vectors (`vectors_python.bin`, `vectors_profile_py.bin`): the original
+  `codec.py` is now vendored unmodified at `experiments/vendor/` (pinned
+  commit, see NOTICE), so the generators run hermetically with only numpy and
+  CI regenerates + compares the vectors byte-for-byte, failing on drift.
 - `DEPLOYMENT.md` and `deploy/` — production deployment kit: a systemd unit
   (`asciline.service`), Docker Compose (`.env.example`, healthcheck, looped
   folder mode), and a Caddy TLS reverse-proxy config. The `deploy/` tree and

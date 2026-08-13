@@ -17,6 +17,14 @@ remain under its license:
 They are served by the Rust server (asciline-server) so that the original
 browser client works against the Rust backend unchanged.
 
+  experiments/vendor/codec.py — the original adaptive + tag-4 profile encoder
+  (commit 7003c2f), copied unmodified
+
+It is used only to regenerate the committed differential test vectors
+(experiments/vectors_python.bin, vectors_profile_py.bin) with the exact
+encoder the Rust port is verified bit-exact against; pinning it keeps those
+vectors reproducible in CI without a checkout of the upstream repo.
+
 The wire protocol (INIT text handshake, binary frame format
 [4-byte frame index BE][1-byte codec tag][payload], codec tags 0-3, and the .ascf
 v2 "ASC2" container) is re-implemented from the original project's public

@@ -13,8 +13,12 @@ writes a binary vector file:
 `shown` is the reconstructed BGR frame the client holds after decoding `msg`
 (the encoder's `yuv_to_bgr` of its own reconstruction).
 
+The ORIGINAL codec.py is vendored at experiments/vendor/ (pinned, see the
+header there), so this runs hermetically with only numpy installed:
+
 Usage:
     python3 experiments/gen_profile_vectors.py > experiments/vectors_profile_py.bin
+    # override the codec.py location with ASCILINE_REPO=/path/to/repo
 """
 import os
 import struct
@@ -22,7 +26,7 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.environ.get("ASCILINE_REPO", "/tmp/asciline-ref"))
+sys.path.insert(0, os.environ.get("ASCILINE_REPO", os.path.join(os.path.dirname(__file__), "vendor")))
 from codec import ProfileEncoder  # noqa: E402
 
 

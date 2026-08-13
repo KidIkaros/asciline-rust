@@ -11,3 +11,7 @@ experiments/gen_python.log
 # cargo-fuzz outputs (fuzz/corpus/ seeds ARE committed)
 fuzz/artifacts
 fuzz/target
+
+# Python bytecode
+__pycache__/
+*.pyc

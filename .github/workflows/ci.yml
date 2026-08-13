@@ -56,9 +56,10 @@ jobs:
 
       - name: Bit-exact differential harnesses (Python codec.py + shipped codec.js)
         # The input vectors (vectors_profile_py.bin / vectors_python.bin) are
-        # committed, so this needs no numpy or the original ASCILINE repo.
-        # roundtrip_profile / decode_python_vectors emit the Rust-side bins the
-        # node scripts then verify against the unchanged browser decoder.
+        # committed and drift-checked by the `vectors-check` job, so this needs
+        # no numpy or the original ASCILINE repo. roundtrip_profile /
+        # decode_python_vectors emit the Rust-side bins the node scripts then
+        # verify against the unchanged browser decoder.
         run: |
           cargo test --test decode_profile_vectors -- --ignored
           cargo test --test roundtrip_profile -- --ignored
@@ -160,6 +161,34 @@ jobs:
             exit 1
           fi
           echo "corpus is byte-reproducible"
+
+  vectors-check:
+    name: Differential vectors reproducible
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python + numpy
+        run: |
+          python3 -m pip install --quiet numpy || { sudo apt-get update && sudo apt-get install -y python3-numpy; }
+
+      - name: Regenerate and compare the committed vectors
+        # vectors_python.bin / vectors_profile_py.bin are produced by the
+        # vendored original codec.py (experiments/vendor/) + numpy. Regenerate
+        # and fail on any byte drift, so the bit-exact differential harnesses
+        # always run against the exact committed inputs.
+        run: |
+          python3 experiments/gen_python_vectors.py > /tmp/vectors_python.bin
+          python3 experiments/gen_profile_vectors.py > /tmp/vectors_profile_py.bin
+          if ! cmp /tmp/vectors_python.bin experiments/vectors_python.bin; then
+            echo "::error::experiments/vectors_python.bin drifted — regenerate it (python3 experiments/gen_python_vectors.py > experiments/vectors_python.bin) and commit"
+            exit 1
+          fi
+          if ! cmp /tmp/vectors_profile_py.bin experiments/vectors_profile_py.bin; then
+            echo "::error::experiments/vectors_profile_py.bin drifted — regenerate it (python3 experiments/gen_profile_vectors.py > experiments/vectors_profile_py.bin) and commit"
+            exit 1
+          fi
+          echo "differential vectors are byte-reproducible"
 
   security-audit:
     name: Security audit (cargo-audit)

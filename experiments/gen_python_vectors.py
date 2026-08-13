@@ -12,9 +12,12 @@ ASCILINE repo) and writes a binary vector file:
 `plain` is the full framebuffer the client should hold after decoding `msg`
 (the Python encoder's "shown frame", lossless here so == the true frame).
 
+The ORIGINAL codec.py is vendored at experiments/vendor/ (pinned, see the
+header there), so this runs hermetically with only numpy installed:
+
 Usage:
-    python3 experiments/gen_python_vectors.py /path/to/asciline-repo > experiments/vectors_python.bin
-    (or: python3 experiments/gen_python_vectors.py   # auto-locates /tmp/asciline-ref)
+    python3 experiments/gen_python_vectors.py > experiments/vectors_python.bin
+    # override the codec.py location with ASCILINE_REPO=/path/to/repo
 """
 import os
 import struct
@@ -22,7 +25,7 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.environ.get("ASCILINE_REPO", "/tmp/asciline-ref"))
+sys.path.insert(0, os.environ.get("ASCILINE_REPO", os.path.join(os.path.dirname(__file__), "vendor")))
 from codec import encode_frame, DEFAULT_LEVEL  # noqa: E402
 
 PALETTE = list(" `.-':_,^=;><+!rc*/z?sLTv)J7(|Fi{C}fI31tlu[neoZ5Yxjya]2ESwqkP6h9d4VpOGbUAKXHm8RD#$Bg0MNWQ%&@")

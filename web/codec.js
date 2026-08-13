@@ -171,8 +171,8 @@
       let off=1;
       if(ft===0){ // keyframe self-describes: [QF][cols u16][rows u16][aq_levels (tags 5/6)]
         const QF=payload[1]; const cols=(payload[2]<<8)|payload[3]; const rows=(payload[4]<<8)|payload[5];
-        if(tag===TAG_PROFILE_AQ){ aqL=payload[6]; off=7; }
-        else if(tag===TAG_PROFILE_HPEL){ aqL=payload[6]; off=7; } // always carries the byte (0 = AQ off)
+        if(tag===TAG_PROFILE_AQ){ aqL=payload[6]; off=7; if(aqL!==2&&aqL!==4) throw new Error('profile AQ levels '+aqL+' out of bounds (2 or 4)'); }
+        else if(tag===TAG_PROFILE_HPEL){ aqL=payload[6]; off=7; if(aqL!==0&&aqL!==2&&aqL!==4) throw new Error('profile AQ levels '+aqL+' out of bounds (0, 2 or 4)'); } // always carries the byte (0 = AQ off)
         else { aqL=0; off=6; }
         hpel = (tag===TAG_PROFILE_HPEL); // tag 6: half-pel motion (luma only)
         const q=_pqtables(QF); QL=q[0]; QC=q[1];

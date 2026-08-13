@@ -1321,8 +1321,12 @@ impl ProfileDecoder {
                     bail!("profile AQ keyframe truncated");
                 }
                 let lv = payload[6];
+                // Only the levels the encoder can emit are accepted: tag 5
+                // carries 2|4, tag 6 additionally carries 0 (AQ off). Anything
+                // else (e.g. 1, which would make log2(levels) = 0 and divide
+                // by zero in the map unpacker) is a clean bail, not a panic.
                 if tag == TAG_PROFILE_HPEL {
-                    if lv > 4 {
+                    if lv != 0 && lv != 2 && lv != 4 {
                         bail!("profile AQ levels {lv} out of bounds (0, 2 or 4)");
                     }
                 } else if lv != 2 && lv != 4 {
@@ -1421,7 +1425,9 @@ fn dec_plane(
 
     // Tag-5 AQ map (luma only): `log2(levels)` bits per block, MSB-first,
     // preceding the skip mask. Unpacked once into per-block quant numerators.
-    let aq_nums: Vec<i64> = if aq_levels > 0 {
+    // `levels` is validated at the keyframe header (2 or 4), but guard the
+    // division anyway so a crafted `dec_plane` call can never panic.
+    let aq_nums: Vec<i64> = if aq_levels == 2 || aq_levels == 4 {
         let bits = (aq_levels as u32).ilog2() as usize;
         let nbytes = nb.div_ceil(8 / bits);
         if off + nbytes > data.len() {
@@ -1783,6 +1789,43 @@ mod tests {
             assert_eq!(msg[4], TAG_PROFILE, "AQ off must emit tag 4");
             let (_, out) = dec.decode(&msg).unwrap();
             assert_eq!(out, shown);
+        }
+    }
+
+    #[test]
+    fn malformed_aq_level_bails_not_panics() {
+        // Fuzz-found: a tag-6 keyframe with aq_levels = 1 (or 3) must bail
+        // cleanly — 1 would make log2(levels) = 0 and divide by zero in the
+        // map unpacker. The decoder must never panic on a crafted stream.
+        for (tag, bad_lv) in [
+            (TAG_PROFILE_HPEL, 1u8),
+            (TAG_PROFILE_HPEL, 3u8),
+            (TAG_PROFILE_AQ, 0u8),
+        ] {
+            let (w, h) = (48usize, 32usize);
+            let mut body = vec![0u8]; // ftype = keyframe
+            body.push(70);
+            body.extend_from_slice(&(w as u16).to_be_bytes());
+            body.extend_from_slice(&(h as u16).to_be_bytes());
+            body.push(bad_lv);
+            let z = zlib_compress(&body, 6);
+            let mut msg = Vec::new();
+            msg.extend_from_slice(&0u32.to_be_bytes());
+            msg.push(tag);
+            msg.extend_from_slice(&z);
+
+            let mut dec = ProfileDecoder::new();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dec.decode(&msg)));
+            match r {
+                Ok(Err(e)) => {
+                    assert!(
+                        e.to_string().contains("out of bounds"),
+                        "expected a clean levels bail, got: {e}"
+                    );
+                }
+                Ok(Ok(_)) => panic!("tag {tag} with aq level {bad_lv} must not decode"),
+                Err(_) => panic!("tag {tag} with aq level {bad_lv} must not panic"),
+            }
         }
     }
 

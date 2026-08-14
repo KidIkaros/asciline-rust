@@ -12,16 +12,23 @@
 //!     tag 0 RAW / 1 ZLIB / 2 DELTA / 3 RLE_FULL
 //!   - `.ascf` static files: 18-byte `ASC2` header + length-prefixed frame records.
 
-pub mod audio;
 pub mod codec;
 pub mod filters;
 pub mod mapper;
 pub mod profile;
 pub mod protocol;
 pub mod quality;
-pub mod queue;
-pub mod server;
 pub mod video;
+
+// The web-server surface (audio + queue + server) is gated so library
+// consumers that only need the decoder (`default-features = false`) don't
+// pull in the tokio/axum dependency tree.
+#[cfg(feature = "server")]
+pub mod audio;
+#[cfg(feature = "server")]
+pub mod queue;
+#[cfg(feature = "server")]
+pub mod server;
 
 pub use codec::{CodecDecoder, CodecEncoder};
 pub use mapper::{Mapper, Palette};

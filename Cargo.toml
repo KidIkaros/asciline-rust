@@ -12,29 +12,47 @@ categories = ["multimedia", "command-line-utilities"]
 name = "asciline"
 path = "src/lib.rs"
 
+[features]
+# Default builds everything, preserving the original behaviour. Library
+# consumers (e.g. a terminal that only wants the video decoder) can set
+# `default-features = false` and skip the async web-server dependency tree.
+default = ["server", "player", "compile", "render"]
+# WebSocket streaming server (axum/tokio; also pulls the audio + queue modules).
+server = ["dep:clap", "dep:tokio", "dep:axum", "dep:futures-util", "dep:tracing", "dep:tracing-subscriber"]
+# True-color terminal player (crossterm/ctrlc).
+player = ["dep:clap", "dep:crossterm", "dep:ctrlc"]
+# Video → .ascf compiler.
+compile = ["dep:clap"]
+# Headless .ascf → PPM renderer (`--live` also needs a WebSocket client).
+render = ["dep:clap", "dep:font8x8", "dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
+
 [[bin]]
 name = "asciline-server"
 path = "src/bin/server.rs"
+required-features = ["server"]
 
 [[bin]]
 name = "asciline-player"
 path = "src/bin/player.rs"
+required-features = ["player"]
 
 [[bin]]
 name = "asciline-compile"
 path = "src/bin/compile.rs"
+required-features = ["compile"]
 
 [[bin]]
 name = "asciline-render"
 path = "src/bin/render.rs"
+required-features = ["render"]
 
 [dependencies]
-# Async runtime + web server
-tokio = { version = "1", features = ["full"] }
-axum = { version = "0.8", features = ["ws", "tokio"] }
-futures-util = "0.3"
+# Async runtime + web server (feature "server")
+tokio = { version = "1", features = ["full"], optional = true }
+axum = { version = "0.8", features = ["ws", "tokio"], optional = true }
+futures-util = { version = "0.3", optional = true }
 # WebSocket client for asciline-render --live (also used by the e2e/load tests)
-tokio-tungstenite = "0.26"
+tokio-tungstenite = { version = "0.26", optional = true }
 
 # Compression (zlib) — flate2's default pure-Rust miniz_oxide backend.
 # Measured on real clips (experiments/compare_zlib_backends.sh): miniz_oxide
@@ -47,27 +65,28 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # Parallelism for the frame mapper
 rayon = "1"
 
-# CLI + serialization
-clap = { version = "4", features = ["derive", "env"] }
+# CLI (feature-gated; the four binaries all derive their args with clap)
+clap = { version = "4", features = ["derive", "env"], optional = true }
+
+# Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Errors
 anyhow = "1"
 
-# Observability: RUST_LOG-controlled server logging
-# (basic console output stays on stdout; tracing carries lifecycle/errors)
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Observability: RUST_LOG-controlled server logging (feature "server")
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
-# Terminal size probing
-crossterm = "0.28"
+# Terminal size probing (feature "player")
+crossterm = { version = "0.28", optional = true }
 
-# 8×8 bitmap glyphs for asciline-render's ASCII rasterization (public domain)
-font8x8 = "0.2"
+# 8×8 bitmap glyphs for asciline-render's ASCII rasterization (feature "render")
+font8x8 = { version = "0.2", optional = true }
 
-# Graceful Ctrl+C for the terminal player
-ctrlc = "3"
+# Graceful Ctrl+C for the terminal player (feature "player")
+ctrlc = { version = "3", optional = true }
 
 [dev-dependencies]
 # Property-based malformed-input harnesses for the decoders (stable, no fuzz crate)
